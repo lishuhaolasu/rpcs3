@@ -1,32 +1,24 @@
-#pragma once
+﻿#pragma once
 
 #include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
-#include "Emu/IdManager.h"
-#include "Emu/CPU/CPUThread.h"
-#include "Emu/CPU/CPUDisAsm.h"
-#include "Emu/Cell/PPUThread.h"
-#include "Emu/Cell/SPUThread.h"
-#include "Emu/Cell/RawSPUThread.h"
-#include "Emu/Cell/PPUDisAsm.h"
-#include "Emu/Cell/SPUDisAsm.h"
-#include "Emu/Cell/PPUInterpreter.h"
 
-#include "breakpoint_handler.h"
 #include "custom_dock_widget.h"
-#include "instruction_editor_dialog.h"
-#include "register_editor_dialog.h"
-#include "gui_settings.h"
-#include "debugger_list.h"
-#include "breakpoint_list.h"
 
 #include <QSplitter>
 #include <QTextEdit>
+#include <QPushButton>
+#include <QComboBox>
+
+class CPUDisAsm;
+class cpu_thread;
+class gui_settings;
+class debugger_list;
+class breakpoint_list;
+class breakpoint_handler;
 
 class debugger_frame : public custom_dock_widget
 {
-	Q_OBJECT;
+	Q_OBJECT
 
 	const QString NoThreadString = tr("No Thread");
 	const QString RunString = tr("Run");
@@ -100,4 +92,4 @@ private Q_SLOTS:
 	void EnableUpdateTimer(bool state);
 };
 
-Q_DECLARE_METATYPE(u32);
+Q_DECLARE_METATYPE(u32)

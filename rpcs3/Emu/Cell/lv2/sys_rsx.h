@@ -1,4 +1,6 @@
-#pragma once
+﻿#pragma once
+
+#include "Emu/Memory/vm_ptr.h"
 
 struct RsxDriverInfo
 {
@@ -21,9 +23,9 @@ struct RsxDriverInfo
 	{
 		be_t<u64> lastFlipTime;    // 0x0 last flip time
 		be_t<u32> flipFlags;       // 0x8 flags to handle flip/queue
-		be_t<u32> unk1;            // 0xC
+		be_t<u32> offset;          // 0xC
 		be_t<u32> flipBufferId;    // 0x10
-		be_t<u32> queuedBufferId;  // 0x14 todo: this is definately not this variable but its 'unused' so im using it for queueId to pass to flip handler
+		be_t<u32> lastQueuedBufferId; // 0x14 todo: this is definately not this variable but its 'unused' so im using it for queueId to pass to flip handler
 		be_t<u32> unk3;            // 0x18
 		be_t<u32> unk6;            // 0x18 possible low bits of time stamp?  used in getlastVBlankTime
 		be_t<u64> lastSecondVTime; // 0x20 last time for second vhandler freq
@@ -54,6 +56,12 @@ struct RsxDriverInfo
 static_assert(sizeof(RsxDriverInfo) == 0x12F8, "rsxSizeTest");
 static_assert(sizeof(RsxDriverInfo::Head) == 0x40, "rsxHeadSizeTest");
 
+enum : u64
+{
+	// Unused
+	SYS_RSX_IO_MAP_IS_STRICT = 1ull << 60
+};
+
 struct RsxDmaControl
 {
 	u8 resv[0x40];
@@ -64,20 +72,20 @@ struct RsxDmaControl
 	be_t<u32> unk1;
 };
 
-struct RsxSemaphore
+struct alignas(16) RsxSemaphore
 {
 	be_t<u32> val;
 	be_t<u32> pad;
 	be_t<u64> timestamp;
 };
 
-struct RsxNotify
+struct alignas(16) RsxNotify
 {
 	be_t<u64> timestamp;
 	be_t<u64> zero;
 };
 
-struct RsxReport
+struct alignas(16) RsxReport
 {
 	be_t<u64> timestamp;
 	be_t<u32> val;
@@ -99,23 +107,25 @@ struct RsxDisplayInfo
 	be_t<u32> height;
 };
 
-struct SysRsxConfig
+struct lv2_rsx_config
 {
-	be_t<u32> rsx_event_port{ 0 };
-	u32 driverInfo{ 0 };
-	u32 rsx_context_addr{ 0 }; 
+	u32 memory_size{};
+	u32 rsx_event_port{};
+	u32 context_base{};
+	u32 device_addr{};
+	u32 driver_info{};
 };
 
 // SysCalls
-s32 sys_rsx_device_open();
-s32 sys_rsx_device_close();
-s32 sys_rsx_memory_allocate(vm::ptr<u32> mem_handle, vm::ptr<u64> mem_addr, u32 size, u64 flags, u64 a5, u64 a6, u64 a7);
-s32 sys_rsx_memory_free(u32 mem_handle);
-s32 sys_rsx_context_allocate(vm::ptr<u32> context_id, vm::ptr<u64> lpar_dma_control, vm::ptr<u64> lpar_driver_info, vm::ptr<u64> lpar_reports, u64 mem_ctx, u64 system_mode);
-s32 sys_rsx_context_free(u32 context_id);
-s32 sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 flags);
-s32 sys_rsx_context_iounmap(u32 context_id, u32 a2, u32 io_addr, u32 size);
-s32 sys_rsx_context_attribute(s32 context_id, u32 package_id, u64 a3, u64 a4, u64 a5, u64 a6);
-s32 sys_rsx_device_map(vm::ptr<u64> dev_addr, vm::ptr<u64> a2, u32 dev_id);
-s32 sys_rsx_device_unmap(u32 dev_id);
-s32 sys_rsx_attribute(u32 a1, u32 a2, u32 a3, u32 a4, u32 a5);
+error_code sys_rsx_device_open();
+error_code sys_rsx_device_close();
+error_code sys_rsx_memory_allocate(vm::ptr<u32> mem_handle, vm::ptr<u64> mem_addr, u32 size, u64 flags, u64 a5, u64 a6, u64 a7);
+error_code sys_rsx_memory_free(u32 mem_handle);
+error_code sys_rsx_context_allocate(vm::ptr<u32> context_id, vm::ptr<u64> lpar_dma_control, vm::ptr<u64> lpar_driver_info, vm::ptr<u64> lpar_reports, u64 mem_ctx, u64 system_mode);
+error_code sys_rsx_context_free(u32 context_id);
+error_code sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 flags);
+error_code sys_rsx_context_iounmap(u32 context_id, u32 io, u32 size);
+error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64 a4, u64 a5, u64 a6);
+error_code sys_rsx_device_map(vm::ptr<u64> dev_addr, vm::ptr<u64> a2, u32 dev_id);
+error_code sys_rsx_device_unmap(u32 dev_id);
+error_code sys_rsx_attribute(u32 a1, u32 a2, u32 a3, u32 a4, u32 a5);

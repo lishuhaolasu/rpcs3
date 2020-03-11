@@ -1,20 +1,22 @@
-#pragma once
+﻿#pragma once
 
-#include "Emu/Cell/Common.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/Cell/SPUInterpreter.h"
+#include "Emu/Memory/vm.h"
 #include "MFC.h"
+#include "Emu/Memory/vm.h"
+#include "Utilities/BEType.h"
 
 #include <map>
+
+LOG_CHANNEL(spu_log, "SPU");
 
 struct lv2_event_queue;
 struct lv2_spu_group;
 struct lv2_int_tag;
 
-class SPUThread;
-
 // JIT Block
-using spu_function_t = void(*)(SPUThread&, void*, u8*);
+using spu_function_t = void(*)(spu_thread&, void*, u8*);
 
 // SPU Channels
 enum : u32
@@ -167,9 +169,9 @@ public:
 	// Returns true on success
 	bool try_push(u32 value)
 	{
-		const u64 old = data.fetch_op([=](u64& data)
+		const u64 old = data.fetch_op([value](u64& data)
 		{
-			if (UNLIKELY(data & bit_count))
+			if (data & bit_count) [[unlikely]]
 			{
 				data |= bit_wait;
 			}
@@ -185,7 +187,7 @@ public:
 	// Push performing bitwise OR with previous value, may require notification
 	void push_or(cpu_thread& spu, u32 value)
 	{
-		const u64 old = data.fetch_op([=](u64& data)
+		const u64 old = data.fetch_op([value](u64& data)
 		{
 			data &= ~bit_wait;
 			data |= bit_count | value;
@@ -216,7 +218,7 @@ public:
 	{
 		const u64 old = data.fetch_op([&](u64& data)
 		{
-			if (LIKELY(data & bit_count))
+			if (data & bit_count) [[likely]]
 			{
 				out = static_cast<u32>(data);
 				data = 0;
@@ -246,12 +248,7 @@ public:
 
 	void set_value(u32 value, bool count = true)
 	{
-		const u64 new_data = u64{count} << off_count | value;
-#ifdef _MSC_VER
-		const_cast<volatile u64&>(data.raw()) = new_data;
-#else
-		__atomic_store_n(&data.raw(), new_data, __ATOMIC_RELAXED);
-#endif
+		data.release(u64{count} << off_count | value);
 	}
 
 	u32 get_value()
@@ -282,16 +279,15 @@ struct spu_channel_4_t
 public:
 	void clear()
 	{
-		values.store({});
-		value3 = 0;
+		values.release({});
 	}
 
 	// push unconditionally (overwriting latest value), returns true if needs signaling
 	void push(cpu_thread& spu, u32 value)
 	{
-		value3 = value; _mm_sfence();
+		value3.release(value);
 
-		if (values.atomic_op([=](sync_var_t& data) -> bool
+		if (values.atomic_op([value](sync_var_t& data) -> bool
 		{
 			switch (data.count++)
 			{
@@ -330,7 +326,6 @@ public:
 
 				data.value0 = data.value1;
 				data.value1 = data.value2;
-				_mm_lfence();
 				data.value2 = this->value3;
 			}
 			else
@@ -359,7 +354,7 @@ struct spu_int_ctrl_t
 	atomic_t<u64> mask;
 	atomic_t<u64> stat;
 
-	std::shared_ptr<struct lv2_int_tag> tag;
+	std::weak_ptr<struct lv2_int_tag> tag;
 
 	void set(u64 ints);
 
@@ -370,9 +365,9 @@ struct spu_int_ctrl_t
 
 	void clear()
 	{
-		mask = 0;
-		stat = 0;
-		tag = nullptr;
+		mask.release(0);
+		stat.release(0);
+		tag.reset();
 	}
 };
 
@@ -500,26 +495,30 @@ public:
 	}
 };
 
-class SPUThread : public cpu_thread
+class spu_thread : public cpu_thread
 {
 public:
-	virtual void on_spawn() override;
-	virtual void on_init(const std::shared_ptr<void>&) override;
-	virtual std::string get_name() const override;
 	virtual std::string dump() const override;
-	virtual void cpu_task() override;
+	virtual void cpu_task() override final;
 	virtual void cpu_mem() override;
 	virtual void cpu_unmem() override;
-	virtual ~SPUThread() override;
+	virtual ~spu_thread() override;
 	void cpu_init();
+	void cpu_stop();
 
 	static const u32 id_base = 0x02000000; // TODO (used to determine thread type)
 	static const u32 id_step = 1;
 	static const u32 id_count = 2048;
 
-	SPUThread(const std::string& name, u32 index, lv2_spu_group* group);
+	spu_thread(vm::addr_t ls, lv2_spu_group* group, u32 index, std::string_view name, u32 lv2_id);
 
 	u32 pc = 0;
+
+	// May be used internally by recompilers.
+	u32 base_pc = 0;
+
+	// May be used by recompilers.
+	u8* memory_base_addr = vm::g_base_addr;
 
 	// General-Purpose Registers
 	std::array<v128, 128> gpr;
@@ -533,11 +532,26 @@ public:
 	u32 mfc_size = 0;
 	u32 mfc_barrier = -1;
 	u32 mfc_fence = -1;
+
+	// MFC proxy command data
+	spu_mfc_cmd mfc_prxy_cmd;
+	shared_mutex mfc_prxy_mtx;
 	atomic_t<u32> mfc_prxy_mask;
+
+	// Tracks writes to MFC proxy command data
+	union
+	{
+		u8 all;
+		bf_t<u8, 0, 1> lsa;
+		bf_t<u8, 1, 1> eal;
+		bf_t<u8, 2, 1> eah;
+		bf_t<u8, 3, 1> tag_size;
+		bf_t<u8, 4, 1> cmd;
+	} mfc_prxy_write_state{};
 
 	// Reservation Data
 	u64 rtime = 0;
-	std::array<u128, 8> rdata{};
+	std::array<v128, 8> rdata{};
 	u32 raddr = 0;
 
 	u32 srr0;
@@ -548,15 +562,15 @@ public:
 	spu_channel ch_stall_stat;
 	spu_channel ch_atomic_stat;
 
-	spu_channel_4_t ch_in_mbox;
+	spu_channel_4_t ch_in_mbox{};
 
 	spu_channel ch_out_mbox;
 	spu_channel ch_out_intr_mbox;
 
-	u64 snr_config; // SPU SNR Config Register
+	u64 snr_config = 0; // SPU SNR Config Register
 
-	spu_channel ch_snr1; // SPU Signal Notification Register 1
-	spu_channel ch_snr2; // SPU Signal Notification Register 2
+	spu_channel ch_snr1{}; // SPU Signal Notification Register 1
+	spu_channel ch_snr2{}; // SPU Signal Notification Register 2
 
 	atomic_t<u32> ch_event_mask;
 	atomic_t<u32> ch_event_stat;
@@ -566,8 +580,15 @@ public:
 	u32 ch_dec_value; // written decrementer value
 
 	atomic_t<u32> run_ctrl; // SPU Run Control register (only provided to get latest data written)
-	atomic_t<u32> status; // SPU Status register
-	atomic_t<u32> npc; // SPU Next Program Counter register
+	shared_mutex run_ctrl_mtx;
+
+	struct alignas(8) status_npc_sync_var
+	{
+		u32 status; // SPU Status register
+		u32 npc; // SPU Next Program Counter register
+	};
+
+	atomic_t<status_npc_sync_var> status_npc;
 
 	std::array<spu_int_ctrl_t, 3> int_ctrl; // SPU Class 0, 1, 2 Interrupt Management
 
@@ -576,9 +597,13 @@ public:
 
 	const u32 index; // SPU index
 	const u32 offset; // SPU LS offset
-	lv2_spu_group* const group; // SPU Thread Group
+private:
+	lv2_spu_group* const group; // SPU Thread Group (only safe to access in the spu thread itself)
+public:
+	const u32 lv2_id; // The actual id that is used by syscalls
 
-	const std::string m_name; // Thread name
+	// Thread name
+	stx::atomic_cptr<std::string> spu_tname;
 
 	std::unique_ptr<class spu_recompiler_base> jit; // Recompiler instance
 
@@ -586,7 +611,7 @@ public:
 	u64 block_recover = 0;
 	u64 block_failure = 0;
 
-	std::array<spu_function_t, 0x10000> jit_dispatcher; // Dispatch table for indirect calls
+	u64 saved_native_sp = 0; // Host thread's stack pointer for emulated longjmp
 
 	std::array<v128, 0x4000> stack_mirror; // Return address information
 
@@ -598,7 +623,7 @@ public:
 	void do_mfc(bool wait = true);
 	u32 get_mfc_completed();
 
-	bool process_mfc_cmd(spu_mfc_cmd args);
+	bool process_mfc_cmd();
 	u32 get_events(bool waiting = false);
 	void set_events(u32 mask);
 	void set_interrupt_status(bool enable);
@@ -622,5 +647,21 @@ public:
 	inline to_be_t<T>& _ref(u32 lsa)
 	{
 		return *_ptr<T>(lsa);
+	}
+
+	bool read_reg(const u32 addr, u32& value);
+	bool write_reg(const u32 addr, const u32 value);
+
+	static atomic_t<u32> g_raw_spu_ctr;
+	static atomic_t<u32> g_raw_spu_id[5];
+
+	static u32 find_raw_spu(u32 id)
+	{
+		if (id < std::size(g_raw_spu_id)) [[likely]]
+		{
+			return g_raw_spu_id[id];
+		}
+
+		return -1;
 	}
 };

@@ -1,29 +1,31 @@
-#pragma once
+﻿#pragma once
 
 #include <map>
-#include <functional>
 #include <memory>
+#include "Utilities/types.h"
 #include "Utilities/VirtualMemory.h"
-
-class shared_mutex;
-class named_thread;
-class cpu_thread;
-class notifier;
+#include "Utilities/StrFmt.h"
+#include "Utilities/BEType.h"
 
 namespace vm
 {
 	extern u8* const g_base_addr;
+	extern u8* const g_sudo_addr;
 	extern u8* const g_exec_addr;
 	extern u8* const g_stat_addr;
 	extern u8* const g_reservations;
-	extern u8* const g_reservations2;
+
+	struct writer_lock;
 
 	enum memory_location_t : uint
 	{
 		main,
-		user_space,
+		user64k,
+		user1m,
+		rsx_context,
 		video,
 		stack,
+		spu,
 
 		memory_location_max,
 		any = 0xffffffff,
@@ -46,84 +48,11 @@ namespace vm
 	// Address type
 	enum addr_t : u32 {};
 
-	extern shared_mutex g_mutex;
-
-	extern thread_local atomic_t<cpu_thread*>* g_tls_locked;
-
-	// Register reader
-	bool passive_lock(cpu_thread& cpu, bool wait = true);
-
-	// Unregister reader
-	void passive_unlock(cpu_thread& cpu);
-
-	// Unregister reader (foreign thread)
-	void cleanup_unlock(cpu_thread& cpu) noexcept;
-
-	// Optimization (set cpu_flag::memory)
-	void temporary_unlock(cpu_thread& cpu) noexcept;
-	void temporary_unlock() noexcept;
-
-	struct reader_lock final
-	{
-		const bool locked;
-
-		reader_lock(const reader_lock&) = delete;
-		reader_lock();
-		~reader_lock();
-
-		explicit operator bool() const { return locked; }
-	};
-
-	struct writer_lock final
-	{
-		const bool locked;
-
-		writer_lock(const writer_lock&) = delete;
-		writer_lock(int full);
-		~writer_lock();
-
-		explicit operator bool() const { return locked; }
-	};
-
-	// Get reservation status for further atomic update: last update timestamp
-	inline atomic_t<u64>& reservation_acquire(u32 addr, u32 size)
-	{
-		// Access reservation info: stamp and the lock bit
-		return reinterpret_cast<atomic_t<u64>*>(g_reservations)[addr / 128];
-	}
-
-	// Update reservation status
-	inline void reservation_update(u32 addr, u32 size, bool lsb = false)
-	{
-		// Update reservation info with new timestamp
-		reservation_acquire(addr, size) = (__rdtsc() << 1) | u64{lsb};
-	}
-
-	// Get reservation sync variable
-	inline notifier& reservation_notifier(u32 addr, u32 size)
-	{
-		return *reinterpret_cast<notifier*>(g_reservations2 + addr / 128 * 8);
-	}
-
-	void reservation_lock_internal(atomic_t<u64>&);
-
-	inline atomic_t<u64>& reservation_lock(u32 addr, u32 size)
-	{
-		auto& res = vm::reservation_acquire(addr, size);
-
-		if (UNLIKELY(atomic_storage<u64>::bts(res.raw(), 0)))
-		{
-			reservation_lock_internal(res);
-		}
-
-		return res;
-	}
-
 	// Change memory protection of specified memory region
 	bool page_protect(u32 addr, u32 size, u8 flags_test = 0, u8 flags_set = 0, u8 flags_clear = 0);
 
 	// Check flags for specified memory range (unsafe)
-	bool check_addr(u32 addr, u32 size = 1, u8 flags = page_allocated);
+	bool check_addr(u32 addr, u32 size = 1, u8 flags = page_readable);
 
 	// Search and map memory in specified memory location (min alignment is 0x10000)
 	u32 alloc(u32 size, memory_location_t location, u32 align = 0x10000);
@@ -141,9 +70,12 @@ namespace vm
 	class block_t final
 	{
 		// Mapped regions: addr -> shm handle
-		std::map<u32, std::shared_ptr<utils::shm>> m_map;
+		std::map<u32, std::pair<u32, std::shared_ptr<utils::shm>>> m_map;
 
-		bool try_alloc(u32 addr, u8 flags, std::shared_ptr<utils::shm>&&);
+		// Common mapped region for special cases
+		std::shared_ptr<utils::shm> m_common;
+
+		bool try_alloc(u32 addr, u8 flags, u32 size, std::shared_ptr<utils::shm>&&);
 
 	public:
 		block_t(u32 addr, u32 size, u64 flags = 0);
@@ -156,32 +88,38 @@ namespace vm
 		const u64 flags; // Currently unused
 
 		// Search and map memory (min alignment is 0x10000)
-		u32 alloc(u32 size, u32 align = 0x10000, const std::shared_ptr<utils::shm>* = nullptr);
+		u32 alloc(u32 size, u32 align = 0x10000, const std::shared_ptr<utils::shm>* = nullptr, u64 flags = 0);
 
 		// Try to map memory at fixed location
-		u32 falloc(u32 addr, u32 size, const std::shared_ptr<utils::shm>* = nullptr);
+		u32 falloc(u32 addr, u32 size, const std::shared_ptr<utils::shm>* = nullptr, u64 flags = 0);
 
 		// Unmap memory at specified location previously returned by alloc(), return size
 		u32 dealloc(u32 addr, const std::shared_ptr<utils::shm>* = nullptr);
 
 		// Get memory at specified address (if size = 0, addr assumed exact)
-		std::pair<const u32, std::shared_ptr<utils::shm>> get(u32 addr, u32 size = 0);
-
-		// Internal
-		u32 imp_used(const vm::writer_lock&);
+		std::pair<u32, std::shared_ptr<utils::shm>> get(u32 addr, u32 size = 0);
 
 		// Get allocated memory count
 		u32 used();
+
+		// Internal
+		u32 imp_used(const vm::writer_lock&);
 	};
 
 	// Create new memory block with specified parameters and return it
 	std::shared_ptr<block_t> map(u32 addr, u32 size, u64 flags = 0);
+
+	// Create new memory block with at arbitrary position with specified alignment
+	std::shared_ptr<block_t> find_map(u32 size, u32 align, u64 flags = 0);
 
 	// Delete existing memory block with specified start address, return it
 	std::shared_ptr<block_t> unmap(u32 addr, bool must_be_empty = false);
 
 	// Get memory block associated with optionally specified memory location or optionally specified address
 	std::shared_ptr<block_t> get(memory_location_t location, u32 addr = 0);
+
+	// Allocate segment at specified location, does nothing if exists already
+	std::shared_ptr<block_t> reserve_map(memory_location_t location, u32 addr, u32 area_size, u64 flags = 0x200);
 
 	// Get PS3/PSV virtual memory address from the provided pointer (nullptr always converted to 0)
 	inline vm::addr_t get_addr(const void* real_ptr)
@@ -211,7 +149,7 @@ namespace vm
 	template<>
 	struct cast_impl<u32>
 	{
-		static vm::addr_t cast(u32 addr, const char* loc)
+		static vm::addr_t cast(u32 addr, const char* /*loc*/)
 		{
 			return static_cast<vm::addr_t>(addr);
 		}
@@ -225,7 +163,7 @@ namespace vm
 	template<>
 	struct cast_impl<u64>
 	{
-		static vm::addr_t cast(u64 addr, const char* loc)
+		static vm::addr_t cast(u64 addr, const char* /*loc*/)
 		{
 			return static_cast<vm::addr_t>(static_cast<u32>(addr));
 		}
@@ -278,6 +216,9 @@ namespace vm
 		g_base_addr[addr] = value;
 	}
 
+	// Read or write virtual memory in a safe manner, returns false on failure
+	bool try_access(u32 addr, void* ptr, u32 size, bool is_write);
+
 	inline namespace ps3_
 	{
 		// Convert specified PS3 address to a pointer of specified (possibly converted to BE) type
@@ -293,32 +234,10 @@ namespace vm
 		}
 
 		// Access memory bypassing memory protection
-		template <typename T>
-		inline std::shared_ptr<to_be_t<T>> get_super_ptr(u32 addr, u32 count = 1)
+		template <typename T = u8>
+		inline to_be_t<T>* get_super_ptr(u32 addr)
 		{
-			const auto area = vm::get(vm::any, addr);
-
-			if (!area || addr + u64{count} * sizeof(T) > UINT32_MAX)
-			{
-				return nullptr;
-			}
-
-			const auto shm = area->get(addr, sizeof(T) * count);
-
-			if (!shm.second || shm.first > addr)
-			{
-				return nullptr;
-			}
-
-			const auto ptr = reinterpret_cast<to_be_t<T>*>(shm.second->get(addr - shm.first, sizeof(T) * count));
-
-			if (!ptr)
-			{
-				return nullptr;
-			}
-
-			// Create a shared pointer using the aliasing constructor
-			return {shm.second, ptr};
+			return reinterpret_cast<to_be_t<T>*>(g_sudo_addr + addr);
 		}
 
 		inline const be_t<u16>& read16(u32 addr)
@@ -355,6 +274,10 @@ namespace vm
 	}
 
 	void close();
-}
 
-#include "vm_var.h"
+	template <typename T, typename AT>
+	class _ptr_base;
+
+	template <typename T, typename AT>
+	class _ref_base;
+}

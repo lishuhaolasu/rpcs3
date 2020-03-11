@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 
@@ -12,7 +12,7 @@ bool squeue_test_exit()
 	return Emu.IsStopped();
 }
 
-logs::channel cellPamf("cellPamf");
+LOG_CHANNEL(cellPamf);
 
 s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 {
@@ -20,7 +20,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 	verify(HERE), (ch < 16);
 	pEsFilterId.supplementalInfo1 = type == CELL_PAMF_STREAM_TYPE_AVC;
 	pEsFilterId.supplementalInfo2 = 0;
-	
+
 	switch (type)
 	{
 	case CELL_PAMF_STREAM_TYPE_AVC:
@@ -38,7 +38,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 		pEsFilterId.filterIdMinor = 0;
 		break;
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_ATRAC3PLUS:
 	{
 		// code = 0xdc
@@ -46,7 +46,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 		pEsFilterId.filterIdMinor = ch;
 		break;
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_PAMF_LPCM:
 	{
 		// code = 0x80
@@ -62,7 +62,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 		pEsFilterId.filterIdMinor = 0x30 | ch;
 		break;
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_USER_DATA:
 	{
 		// code = 0xdd
@@ -102,7 +102,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 		pEsFilterId.filterIdMinor = 0x20 | ch;
 		break;
 	}
-		
+
 	default:
 	{
 		cellPamf.error("pamfStreamTypeToEsFilterId(): unknown type (%d, ch=%d)", type, ch);
@@ -117,7 +117,7 @@ s32 pamfStreamTypeToEsFilterId(u8 type, u8 ch, CellCodecEsFilterId& pEsFilterId)
 u8 pamfGetStreamType(vm::ptr<CellPamfReader> pSelf, u32 stream)
 {
 	// TODO: get stream type correctly
-	verify(HERE), (stream < (u32)pSelf->pAddr->stream_count);
+	verify(HERE), (stream < pSelf->pAddr->stream_count);
 	auto& header = pSelf->pAddr->stream_headers[stream];
 
 	switch (header.type)
@@ -138,7 +138,7 @@ u8 pamfGetStreamType(vm::ptr<CellPamfReader> pSelf, u32 stream)
 u8 pamfGetStreamChannel(vm::ptr<CellPamfReader> pSelf, u32 stream)
 {
 	// TODO: get stream channel correctly
-	verify(HERE), (stream < (u32)pSelf->pAddr->stream_count);
+	verify(HERE), (stream < pSelf->pAddr->stream_count);
 	auto& header = pSelf->pAddr->stream_headers[stream];
 
 	switch (header.type)
@@ -149,13 +149,13 @@ u8 pamfGetStreamChannel(vm::ptr<CellPamfReader> pSelf, u32 stream)
 		verify(HERE), (header.fid_major & 0xf0) == 0xe0, header.fid_minor == 0;
 		return header.fid_major % 16;
 	}
-		
+
 	case 0xdc: // ATRAC3PLUS
 	{
 		verify(HERE), header.fid_major == 0xbd, (header.fid_minor & 0xf0) == 0;
 		return header.fid_minor % 16;
 	}
-		
+
 	case 0x80: // LPCM
 	{
 		verify(HERE), header.fid_major == 0xbd, (header.fid_minor & 0xf0) == 0x40;
@@ -184,7 +184,7 @@ s32 cellPamfGetHeaderSize(vm::ptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<u64> 
 
 	//if ((u32)pAddr->magic != 0x464d4150) return CELL_PAMF_ERROR_UNKNOWN_TYPE;
 
-	const u64 offset = (u64)pAddr->data_offset << 11;
+	const u64 offset = u64{pAddr->data_offset} << 11;
 	*pSize = offset;
 	return CELL_OK;
 }
@@ -195,7 +195,7 @@ s32 cellPamfGetHeaderSize2(vm::ptr<PamfHeader> pAddr, u64 fileSize, u32 attribut
 
 	//if ((u32)pAddr->magic != 0x464d4150) return CELL_PAMF_ERROR_UNKNOWN_TYPE;
 
-	const u64 offset = (u64)pAddr->data_offset << 11;
+	const u64 offset = u64{pAddr->data_offset} << 11;
 	*pSize = offset;
 	return CELL_OK;
 }
@@ -206,9 +206,9 @@ s32 cellPamfGetStreamOffsetAndSize(vm::ptr<PamfHeader> pAddr, u64 fileSize, vm::
 
 	//if ((u32)pAddr->magic != 0x464d4150) return CELL_PAMF_ERROR_UNKNOWN_TYPE;
 
-	const u64 offset = (u64)pAddr->data_offset << 11;
+	const u64 offset = u64{pAddr->data_offset} << 11;
 	*pOffset = offset;
-	const u64 size = (u64)pAddr->data_size << 11;
+	const u64 size = u64{pAddr->data_size} << 11;
 	*pSize = size;
 	return CELL_OK;
 }
@@ -224,14 +224,14 @@ s32 cellPamfVerify(vm::ptr<PamfHeader> pAddr, u64 fileSize)
 s32 cellPamfReaderInitialize(vm::ptr<CellPamfReader> pSelf, vm::cptr<PamfHeader> pAddr, u64 fileSize, u32 attribute)
 {
 	cellPamf.warning("cellPamfReaderInitialize(pSelf=*0x%x, pAddr=*0x%x, fileSize=0x%llx, attribute=0x%x)", pSelf, pAddr, fileSize, attribute);
-	
+
 	if (fileSize)
 	{
 		pSelf->fileSize = fileSize;
 	}
 	else // if fileSize is unknown
 	{
-		pSelf->fileSize = ((u64)pAddr->data_offset << 11) + ((u64)pAddr->data_size << 11);
+		pSelf->fileSize = (u64{pAddr->data_offset} << 11) + (u64{pAddr->data_size} << 11);
 	}
 	pSelf->pAddr = pAddr;
 
@@ -251,7 +251,7 @@ s32 cellPamfReaderGetPresentationStartTime(vm::ptr<CellPamfReader> pSelf, vm::pt
 
 	// always returns CELL_OK
 
-	pTimeStamp->upper = (u32)(u16)pSelf->pAddr->start_pts_high;
+	pTimeStamp->upper = pSelf->pAddr->start_pts_high;
 	pTimeStamp->lower = pSelf->pAddr->start_pts_low;
 	return CELL_OK;
 }
@@ -262,7 +262,7 @@ s32 cellPamfReaderGetPresentationEndTime(vm::ptr<CellPamfReader> pSelf, vm::ptr<
 
 	// always returns CELL_OK
 
-	pTimeStamp->upper = (u32)(u16)pSelf->pAddr->end_pts_high;
+	pTimeStamp->upper = pSelf->pAddr->end_pts_high;
 	pTimeStamp->lower = pSelf->pAddr->end_pts_low;
 	return CELL_OK;
 }
@@ -286,7 +286,7 @@ u8 cellPamfReaderGetNumberOfStreams(vm::ptr<CellPamfReader> pSelf)
 u8 cellPamfReaderGetNumberOfSpecificStreams(vm::ptr<CellPamfReader> pSelf, u8 streamType)
 {
 	cellPamf.warning("cellPamfReaderGetNumberOfSpecificStreams(pSelf=*0x%x, streamType=%d)", pSelf, streamType);
-	
+
 	// cannot return error code
 
 	u8 counts[256] = {};
@@ -307,12 +307,12 @@ u8 cellPamfReaderGetNumberOfSpecificStreams(vm::ptr<CellPamfReader> pSelf, u8 st
 	{
 		return counts[streamType];
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_VIDEO:
 	{
 		return counts[CELL_PAMF_STREAM_TYPE_AVC] + counts[CELL_PAMF_STREAM_TYPE_M2V];
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_AUDIO:
 	{
 		return counts[CELL_PAMF_STREAM_TYPE_ATRAC3PLUS] + counts[CELL_PAMF_STREAM_TYPE_PAMF_LPCM] + counts[CELL_PAMF_STREAM_TYPE_AC3];
@@ -351,7 +351,7 @@ s32 cellPamfReaderSetStreamWithTypeAndChannel(vm::ptr<CellPamfReader> pSelf, u8 
 
 	for (u8 i = 0; i < pSelf->pAddr->stream_count; i++)
 	{
-		if (pamfGetStreamType(pSelf, i) == streamType) 
+		if (pamfGetStreamType(pSelf, i) == streamType)
 		{
 			if (pamfGetStreamChannel(pSelf, i) == ch)
 			{
@@ -388,7 +388,7 @@ s32 cellPamfReaderSetStreamWithTypeAndIndex(vm::ptr<CellPamfReader> pSelf, u8 st
 			}
 			break;
 		}
-			
+
 		case CELL_PAMF_STREAM_TYPE_AUDIO:
 		{
 			if (type == CELL_PAMF_STREAM_TYPE_ATRAC3PLUS || type == CELL_PAMF_STREAM_TYPE_AC3 || type == CELL_PAMF_STREAM_TYPE_PAMF_LPCM)
@@ -397,7 +397,7 @@ s32 cellPamfReaderSetStreamWithTypeAndIndex(vm::ptr<CellPamfReader> pSelf, u8 st
 			}
 			break;
 		}
-			
+
 		default:
 		{
 			if (streamType > 5)
@@ -425,7 +425,7 @@ s32 cellPamfStreamTypeToEsFilterId(u8 type, u8 ch, vm::ptr<CellCodecEsFilterId> 
 	{
 		return CELL_PAMF_ERROR_INVALID_ARG;
 	}
-	
+
 	return pamfStreamTypeToEsFilterId(type, ch, *pEsFilterId);
 }
 
@@ -454,7 +454,7 @@ s32 cellPamfReaderGetEsFilterId(vm::ptr<CellPamfReader> pSelf, vm::ptr<CellCodec
 
 	// always returns CELL_OK
 
-	verify(HERE), (u32)pSelf->stream < pSelf->pAddr->stream_count;
+	verify(HERE), static_cast<u32>(pSelf->stream) < pSelf->pAddr->stream_count;
 	auto& header = pSelf->pAddr->stream_headers[pSelf->stream];
 	pEsFilterId->filterIdMajor = header.fid_major;
 	pEsFilterId->filterIdMinor = header.fid_minor;
@@ -467,7 +467,7 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 {
 	cellPamf.warning("cellPamfReaderGetStreamInfo(pSelf=*0x%x, pInfo=*0x%x, size=%d)", pSelf, pInfo, size);
 
-	verify(HERE), (u32)pSelf->stream < pSelf->pAddr->stream_count;
+	verify(HERE), static_cast<u32>(pSelf->stream) < pSelf->pAddr->stream_count;
 	auto& header = pSelf->pAddr->stream_headers[pSelf->stream];
 	const u8 type = pamfGetStreamType(pSelf, pSelf->stream);
 	const u8 ch = pamfGetStreamChannel(pSelf, pSelf->stream);
@@ -501,8 +501,8 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 			info->sarHeight = 0;
 		}
 
-		info->horizontalSize = ((u16)header.AVC.horizontalSize & 0xff) * 16;
-		info->verticalSize = ((u16)header.AVC.verticalSize & 0xff) * 16;
+		info->horizontalSize = (header.AVC.horizontalSize & u8{0xff}) * 16;
+		info->verticalSize = (header.AVC.verticalSize & u8{0xff}) * 16;
 		info->frameCropLeftOffset = header.AVC.frameCropLeftOffset;
 		info->frameCropRightOffset = header.AVC.frameCropRightOffset;
 		info->frameCropTopOffset = header.AVC.frameCropTopOffset;
@@ -524,7 +524,7 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 			info->transferCharacteristics = 0;
 			info->matrixCoefficients = 0;
 		}
-		
+
 		info->entropyCodingModeFlag = (header.AVC.x18 & 0x80) >> 7;
 		info->deblockingFilterFlag = (header.AVC.x18 & 0x40) >> 6;
 		info->minNumSlicePerPictureIdc = (header.AVC.x18 & 0x30) >> 4;
@@ -534,7 +534,7 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 		cellPamf.notice("cellPamfReaderGetStreamInfo(): CELL_PAMF_STREAM_TYPE_AVC");
 		break;
 	}
-		
+
 	case CELL_PAMF_STREAM_TYPE_M2V:
 	{
 		if (size < sizeof(CellPamfM2vInfo))
@@ -567,8 +567,8 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 			info->sarHeight = 0;
 		}
 
-		info->horizontalSize = ((u16)header.M2V.horizontalSize & 0xff) * 16;
-		info->verticalSize = ((u16)header.M2V.verticalSize & 0xff) * 16;
+		info->horizontalSize = (header.M2V.horizontalSize & u8{0xff}) * 16;
+		info->verticalSize = (header.M2V.verticalSize & u8{0xff}) * 16;
 		info->horizontalSizeValue = header.M2V.horizontalSizeValue;
 		info->verticalSizeValue = header.M2V.verticalSizeValue;
 
@@ -592,8 +592,8 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 		cellPamf.notice("cellPamfReaderGetStreamInfo(): CELL_PAMF_STREAM_TYPE_M2V");
 		break;
 	}
-		
-	case CELL_PAMF_STREAM_TYPE_ATRAC3PLUS: 
+
+	case CELL_PAMF_STREAM_TYPE_ATRAC3PLUS:
 	{
 		if (size < sizeof(CellPamfAtrac3plusInfo))
 		{
@@ -694,7 +694,7 @@ s32 cellPamfReaderGetStreamInfo(vm::ptr<CellPamfReader> pSelf, vm::ptr<void> pIn
 		return CELL_PAMF_ERROR_INVALID_PAMF;
 	}
 	}
-	
+
 	return CELL_OK;
 }
 

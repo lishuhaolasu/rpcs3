@@ -1,20 +1,21 @@
 ﻿#include "stdafx.h"
 #include "save_data_list_dialog.h"
 #include "save_data_info_dialog.h"
+#include "gui_settings.h"
 
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QMenu>
-#include <QDesktopWidget>
-#include <QApplication>
+#include <QGuiApplication>
+#include <QScreen>
 
 constexpr auto qstr = QString::fromStdString;
 
 //Show up the savedata list, either to choose one to save/load or to manage saves.
 //I suggest to use function callbacks to give save data list or get save data entry. (Not implemented or stubbed)
 save_data_list_dialog::save_data_list_dialog(const std::vector<SaveDataEntry>& entries, s32 focusedEntry, u32 op, vm::ptr<CellSaveDataListSet> listSet, QWidget* parent)
-	: QDialog(parent), m_save_entries(entries), m_entry(selection_code::new_save), m_entry_label(nullptr)
+	: QDialog(parent)
+	, m_save_entries(entries)
 {
 	if (op >= 8)
 	{
@@ -46,7 +47,7 @@ save_data_list_dialog::save_data_list_dialog(const std::vector<SaveDataEntry>& e
 	// Button Layout
 	QHBoxLayout* hbox_action = new QHBoxLayout();
 
-	if (entries.size() > 0)
+	if (!entries.empty())
 	{ // If there are no entries, don't add the selection widget or the selection label to the UI.
 		QPushButton *push_select = new QPushButton(tr("&Select Entry"), this);
 		connect(push_select, &QAbstractButton::clicked, this, &save_data_list_dialog::accept);
@@ -58,7 +59,7 @@ save_data_list_dialog::save_data_list_dialog(const std::vector<SaveDataEntry>& e
 		UpdateSelectionLabel();
 	}
 
-	if (listSet->newData)
+	if (listSet && listSet->newData)
 	{
 		QPushButton *saveNewEntry = new QPushButton(tr("Save New Entry"), this);
 		connect(saveNewEntry, &QAbstractButton::clicked, this, [&]()
@@ -178,7 +179,7 @@ void save_data_list_dialog::OnEntryInfo()
 void save_data_list_dialog::UpdateList()
 {
 	m_list->clearContents();
-	m_list->setRowCount((int)m_save_entries.size());
+	m_list->setRowCount(::narrow<int>(m_save_entries.size()));
 
 	QVariantMap currNotes = m_gui_settings->GetValue(gui::m_saveNotes).toMap();
 
@@ -225,7 +226,7 @@ void save_data_list_dialog::UpdateList()
 
 	QSize preferredSize = minimumSize().expandedTo(sizeHint() - m_list->sizeHint() + tableSize);
 
-	QSize maxSize = QSize(preferredSize.width(), static_cast<int>(QApplication::desktop()->screenGeometry().height()*.6));
+	QSize maxSize = QSize(preferredSize.width(), static_cast<int>(QGuiApplication::primaryScreen()->geometry().height() * 0.6));
 
 	resize(preferredSize.boundedTo(maxSize));
 }

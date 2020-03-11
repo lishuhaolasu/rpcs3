@@ -1,7 +1,7 @@
 #pragma once
 
-#include "Emu/Memory/Memory.h"
 #include "Emu/Cell/ErrorCodes.h"
+#include "Emu/Memory/vm_ptr.h"
 #include "Emu/IdManager.h"
 
 enum : u32
@@ -46,17 +46,12 @@ struct sys_page_attr_t
 
 struct lv2_memory_container
 {
-	static const u32 id_base = 0x1; // Wrong?
+	static const u32 id_base = 0x3F000000;
 	static const u32 id_step = 0x1;
 	static const u32 id_count = 16;
 
-	// This is purposely set lower to fake the size of the OS
-	// Todo: This could change with requested sdk
-	const u32 size = 0xEC00000; // Amount of "physical" memory in this container
-
+	const u32 size; // Amount of "physical" memory in this container
 	atomic_t<u32> used{}; // Amount of "physical" memory currently used
-
-	lv2_memory_container() = default;
 
 	lv2_memory_container(u32 size)
 		: size(size)
@@ -66,20 +61,18 @@ struct lv2_memory_container
 	// Try to get specified amount of "physical" memory
 	u32 take(u32 amount)
 	{
-		const u32 old_value = used.fetch_op([&](u32& value)
+		auto [_, result] = used.fetch_op([&](u32& value) -> u32
 		{
 			if (size - value >= amount)
 			{
 				value += amount;
+				return amount;
 			}
+
+			return 0;
 		});
 
-		if (size - old_value >= amount)
-		{
-			return amount;
-		}
-
-		return 0;
+		return result;
 	}
 };
 
@@ -87,7 +80,7 @@ struct lv2_memory_alloca
 {
 	static const u32 id_base = 0x1;
 	static const u32 id_step = 0x1;
-	static const u32 id_count = 0x1000;
+	static const u32 id_count = 0x2000;
 
 	const u32 size; // Memory size
 	const u32 align; // Alignment required
@@ -98,12 +91,24 @@ struct lv2_memory_alloca
 	lv2_memory_alloca(u32 size, u32 align, u64 flags, const std::shared_ptr<lv2_memory_container>& ct);
 };
 
+struct sys_memory_user_memory_stat_t
+{
+	be_t<u32> a; // 0x0
+	be_t<u32> b; // 0x4
+	be_t<u32> c; // 0x8
+	be_t<u32> d; // 0xc
+	be_t<u32> e; // 0x10
+	be_t<u32> f; // 0x14
+	be_t<u32> g; // 0x18
+};
+
 // SysCalls
 error_code sys_memory_allocate(u32 size, u64 flags, vm::ptr<u32> alloc_addr);
 error_code sys_memory_allocate_from_container(u32 size, u32 cid, u64 flags, vm::ptr<u32> alloc_addr);
 error_code sys_memory_free(u32 start_addr);
 error_code sys_memory_get_page_attribute(u32 addr, vm::ptr<sys_page_attr_t> attr);
 error_code sys_memory_get_user_memory_size(vm::ptr<sys_memory_info_t> mem_info);
+error_code sys_memory_get_user_memory_stat(vm::ptr<sys_memory_user_memory_stat_t> mem_stat);
 error_code sys_memory_container_create(vm::ptr<u32> cid, u32 size);
 error_code sys_memory_container_destroy(u32 cid);
 error_code sys_memory_container_get_size(vm::ptr<sys_memory_info_t> mem_info, u32 cid);

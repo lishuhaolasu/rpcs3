@@ -28,12 +28,6 @@ class patch_engine
 		patch_type type;
 		u32 offset;
 		u64 value;
-
-		template <typename T>
-		T& value_as()
-		{
-			return *reinterpret_cast<T*>(reinterpret_cast<char*>(&value));
-		}
 	};
 
 	// Database
@@ -45,4 +39,6 @@ public:
 
 	// Apply patch (returns the number of entries applied)
 	std::size_t apply(const std::string& name, u8* dst) const;
+	// Apply patch with a check that the address exists in SPU local storage
+	std::size_t apply_with_ls_check(const std::string&name, u8*dst, u32 filesz, u32 ls_addr) const;
 };

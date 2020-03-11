@@ -1,4 +1,6 @@
 #include "stdafx.h"
+#include "PPUFunction.h"
+
 #include "PPUModule.h"
 
 extern std::string ppu_get_syscall_name(u64 code)
@@ -19,8 +21,9 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 23: return "sys_process_wait_for_child2";
 	case 25: return "sys_process_get_sdk_version";
 	case 26: return "_sys_process_exit2";
+	case 27: return "sys_process_spawns_a_self2";
 	case 28: return "_sys_process_get_number_of_object";
-	case 29: return "sys_process_get_id";
+	case 29: return "sys_process_get_id2";
 	case 30: return "_sys_process_get_paramsfo";
 	case 31: return "sys_process_get_ppu_guid";
 	case 41: return "_sys_ppu_thread_exit";
@@ -93,7 +96,9 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 114: return "sys_semaphore_get_value";
 	case 115: return "_sys_lwcond_signal";
 	case 116: return "_sys_lwcond_signal_all";
+	case 117: return "_sys_lwmutex_unlock2";
 	case 118: return "sys_event_flag_clear";
+	case 119: return "sys_time_get_rtc";
 	case 120: return "sys_rwlock_create";
 	case 121: return "sys_rwlock_destroy";
 	case 122: return "sys_rwlock_rlock";
@@ -167,6 +172,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 197: return "sys_raw_spu_get_spu_cfg";
 	case 198: return "sys_spu_thread_recover_page_fault";
 	case 199: return "sys_raw_spu_recover_page_fault";
+	case 213: return "sys_console_write2";
 	case 215: return "sys_dbg_mat_set_condition";
 	case 216: return "sys_dbg_mat_get_condition";
 	case 230: return "sys_isolated_spu_create";
@@ -187,6 +193,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 250: return "sys_spu_thread_group_set_cooperative_victims";
 	case 251: return "sys_spu_thread_group_connect_event_all_threads";
 	case 252: return "sys_spu_thread_group_disconnect_event_all_threads";
+	case 253: return "sys_spu_thread_group_syscall_253";
 	case 254: return "sys_spu_thread_group_log";
 	case 260: return "sys_spu_image_open_by_fd";
 	case 300: return "sys_vm_memory_map";
@@ -207,6 +214,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 325: return "sys_memory_container_destroy";
 	case 326: return "sys_mmapper_allocate_fixed_address";
 	case 327: return "sys_mmapper_enable_page_fault_notification";
+	case 328: return "sys_mmapper_allocate_shared_memory_from_container_ext";
 	case 329: return "sys_mmapper_free_shared_memory";
 	case 330: return "sys_mmapper_allocate_address";
 	case 331: return "sys_mmapper_free_address";
@@ -217,6 +225,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 336: return "sys_mmapper_change_address_access_right";
 	case 337: return "sys_mmapper_search_and_map";
 	case 338: return "sys_mmapper_get_shared_memory_attribute";
+	case 339: return "sys_mmapper_allocate_shared_memory_ext";
 	case 341: return "sys_memory_container_create";
 	case 342: return "sys_memory_container_destroy";
 	case 343: return "sys_memory_container_get_size";
@@ -244,11 +253,12 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 379: return "sys_sm_shutdown";
 	case 380: return "sys_sm_get_params";
 	case 381: return "sys_sm_get_inter_lpar_parameter";
+	case 382: return "sys_sm_initialize";
 	case 383: return "sys_game_get_temperature";
 	case 384: return "sys_sm_get_tzpb";
 	case 385: return "sys_sm_request_led";
 	case 386: return "sys_sm_control_led";
-	case 387: return "sys_sm_get_platform_info";
+	case 387: return "sys_sm_get_system_info";
 	case 388: return "sys_sm_ring_buzzer";
 	case 389: return "sys_sm_set_fan_policy";
 	case 390: return "sys_sm_request_error_log";
@@ -283,6 +293,8 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 465: return "_sys_prx_load_module_list";
 	case 466: return "_sys_prx_load_module_list_on_memcontainer";
 	case 467: return "sys_prx_get_ppu_guid";
+	case 470: return "sys_npdrm_check_ekc";
+	case 471: return "sys_npdrm_regist_ekc";
 	case 480: return "_sys_prx_load_module";
 	case 481: return "_sys_prx_start_module";
 	case 482: return "_sys_prx_stop_module";
@@ -294,6 +306,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 488: return "_sys_prx_link_library";
 	case 489: return "_sys_prx_unlink_library";
 	case 490: return "_sys_prx_query_library";
+	case 492: return "sys_prx_dbg_get_module_list";
 	case 493: return "sys_prx_dbg_get_module_info";
 	case 494: return "_sys_prx_get_module_list";
 	case 495: return "_sys_prx_get_module_info";
@@ -311,6 +324,10 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 507: return "sys_hid_manager_remove_hot_key_observer";
 	case 508: return "sys_hid_manager_grab_focus";
 	case 509: return "sys_hid_manager_release_focus";
+	case 510: return "sys_hid_manager_check_focus";
+	case 511: return "sys_hid_manager_set_master_process";
+	case 512: return "sys_hid_manager_is_process_permission_root";
+	case 514: return "sys_hid_manager_514";
 	case 516: return "sys_config_open";
 	case 517: return "sys_config_close";
 	case 518: return "sys_config_get_service_event";
@@ -318,7 +335,9 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 520: return "sys_config_remove_service_listener";
 	case 521: return "sys_config_register_service";
 	case 522: return "sys_config_unregister_service";
-	case 523: return "sys_config_io_event";
+	case 523: return "sys_config_get_io_event";
+	case 524: return "sys_config_register_io_error_listener";
+	case 525: return "sys_config_unregister_io_error_listener";
 	case 530: return "sys_usbd_initialize";
 	case 531: return "sys_usbd_finalize";
 	case 532: return "sys_usbd_get_device_list";
@@ -338,15 +357,32 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 546: return "sys_usbd_get_isochronous_transfer_status";
 	case 547: return "sys_usbd_get_device_location";
 	case 548: return "sys_usbd_send_event";
+	case 549: return "sys_usbd_event_port_send";
 	case 550: return "sys_usbd_allocate_memory";
 	case 551: return "sys_usbd_free_memory";
 	case 556: return "sys_usbd_get_device_speed";
 	case 559: return "sys_usbd_register_extra_ldd";
+	case 570: return "sys_pad_ldd_register_controller";
 	case 571: return "sys_pad_ldd_unregister_controller";
 	case 572: return "sys_pad_ldd_data_insert";
 	case 573: return "sys_pad_dbg_ldd_set_data_insert_mode";
 	case 574: return "sys_pad_ldd_register_controller";
 	case 575: return "sys_pad_ldd_get_port_no";
+	case 583: return "sys_bt_read_firmware_version";
+	case 584: return "sys_bt_complete_wake_on_host";
+	case 585: return "sys_bt_disable_bluetooth";
+	case 586: return "sys_bt_enable_bluetooth";
+	case 587: return "sys_bt_bccmd";
+	case 588: return "sys_bt_read_hq";
+	case 589: return "sys_bt_hid_get_remote_status";
+	case 590: return "sys_bt_register_controller";
+	case 591: return "sys_bt_clear_registered_contoller";
+	case 592: return "sys_bt_connect_accept_controller";
+	case 593: return "sys_bt_get_local_bdaddress";
+	case 594: return "sys_bt_hid_get_data";
+	case 595: return "sys_bt_hid_set_report";
+	case 596: return "sys_bt_sched_log";
+	case 597: return "sys_bt_cancel_connect_accept_controller";
 	case 600: return "sys_storage_open";
 	case 601: return "sys_storage_close";
 	case 602: return "sys_storage_read";
@@ -379,6 +415,14 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 633: return "sys_fsw_connect_event";
 	case 634: return "sys_fsw_disconnect_event";
 	case 635: return "sys_btsetting_if";
+	case 640: return "sys_usbbtaudio_initialize";
+	case 641: return "sys_usbbtaudio_finalize";
+	case 642: return "sys_usbbtaudio_discovery";
+	case 643: return "sys_usbbtaudio_cancel_discovery";
+	case 644: return "sys_usbbtaudio_pairing";
+	case 645: return "sys_usbbtaudio_set_passkey";
+	case 646: return "sys_usbbtaudio_connect";
+	case 647: return "sys_usbbtaudio_disconnect";
 	case 650: return "sys_rsxaudio_initialize";
 	case 651: return "sys_rsxaudio_finalize";
 	case 652: return "sys_rsxaudio_import_shared_memory";
@@ -477,7 +521,15 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 846: return "sys_fs_mapped_free";
 	case 847: return "sys_fs_truncate2";
 	case 860: return "sys_ss_get_cache_of_analog_sunset_flag";
+	case 861: return "sys_ss_protected_file_db";
+	case 862: return "sys_ss_virtual_trm_manager";
+	case 863: return "sys_ss_update_manager";
+	case 864: return "sys_ss_sec_hw_framework";
 	case 865: return "sys_ss_random_number_generator";
+	case 866: return "sys_ss_secure_rtc";
+	case 867: return "sys_ss_appliance_info_manager";
+	case 868: return "sys_ss_individual_info_manager";
+	case 869: return "sys_ss_factory_data_manager";
 	case 870: return "sys_ss_get_console_id";
 	case 871: return "sys_ss_access_control_engine";
 	case 872: return "sys_ss_get_open_psid";
@@ -526,7 +578,14 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 921: return "sys_dbg_set_process_event_cntl_flag";
 	case 922: return "sys_dbg_get_spu_thread_group_event_cntl_flag";
 	case 923: return "sys_dbg_set_spu_thread_group_event_cntl_flag";
+	case 924: return "sys_dbg_get_module_list";
 	case 925: return "sys_dbg_get_raw_spu_list";
+	case 926: return "sys_dbg_initialize_scratch_executable_area";
+	case 927: return "sys_dbg_terminate_scratch_executable_area";
+	case 928: return "sys_dbg_initialize_scratch_data_area";
+	case 929: return "sys_dbg_terminate_scratch_data_area";
+	case 930: return "sys_dbg_get_user_memory_stat";
+	case 931: return "sys_dbg_get_shared_memory_attribute_list";
 	case 932: return "sys_dbg_get_mutex_list";
 	case 933: return "sys_dbg_get_mutex_information";
 	case 934: return "sys_dbg_get_cond_list";
@@ -553,7 +612,15 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 955: return "sys_dbg_enable_floating_point_enabled_exception";
 	case 956: return "sys_dbg_disable_floating_point_enabled_exception";
 	case 957: return "sys_dbg_get_process_memory_container_information";
-	case 960: return "sys_dbg_perfomance_monitor";
+	case 960: return "sys_control_performance_monitor";
+	case 961: return "sys_performance_monitor_hidden";
+	case 962: return "sys_performance_monitor_bookmark";
+	case 963: return "sys_lv1_pc_trace_create";
+	case 964: return "sys_lv1_pc_trace_start";
+	case 965: return "sys_lv1_pc_trace_stop";
+	case 966: return "sys_lv1_pc_trace_get_status";
+	case 967: return "sys_lv1_pc_trace_destroy";
+	case 968: return "sys_rsx_trace_ioctl";
 	case 970: return "sys_dbg_get_event_flag_list";
 	case 971: return "sys_dbg_get_event_flag_information";
 	case 975: return "sys_dbg_read_spu_thread_context2";
@@ -575,7 +642,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 // Get function name by FNID
 extern std::string ppu_get_function_name(const std::string& module, u32 fnid)
 {
-	if (module == "") switch (fnid)
+	if (module.empty()) switch (fnid)
 	{
 	case 0x0d10fd3f: return "module_prologue";
 	case 0x330f7005: return "module_epilogue";
@@ -2371,7 +2438,7 @@ extern std::string ppu_get_function_name(const std::string& module, u32 fnid)
 // Get variable name by VNID
 extern std::string ppu_get_variable_name(const std::string& module, u32 vnid)
 {
-	if (module == "") switch (vnid)
+	if (module.empty()) switch (vnid)
 	{
 	// these arent the actual hash, but its close enough
 	case 0xd7f43016: return "module_info";
@@ -2463,14 +2530,16 @@ std::vector<ppu_function_t>& ppu_function_manager::access()
 	{
 		[](ppu_thread& ppu) -> bool
 		{
-			LOG_ERROR(PPU, "Unregistered function called (LR=0x%x)", ppu.lr);
+			ppu_log.error("Unregistered function called (LR=0x%x)", ppu.lr);
 			ppu.gpr[3] = 0;
-			return true;
+			ppu.cia = static_cast<u32>(ppu.lr) & ~3;
+			return false;
 		},
 		[](ppu_thread& ppu) -> bool
 		{
 			ppu.state += cpu_flag::ret;
-			return true;
+			ppu.cia += 4;
+			return false;
 		},
 	};
 

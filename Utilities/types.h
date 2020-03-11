@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -9,41 +9,57 @@
 #include <emmintrin.h>
 
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <type_traits>
 #include <utility>
 #include <chrono>
+#include <limits>
 #include <array>
 
-// Assume little-endian
-#define IS_LE_MACHINE 1
-#define IS_BE_MACHINE 0
+#if __has_include(<bit>)
+#include <bit>
+#endif
+
+#ifndef __has_builtin
+	#define __has_builtin(x) 0
+#endif
 
 #ifdef _MSC_VER
-#define ASSUME(cond) __assume(cond)
-#define LIKELY
-#define UNLIKELY
+
+#define ASSUME(...) __assume(__VA_ARGS__) // MSVC __assume ignores side-effects
 #define SAFE_BUFFERS __declspec(safebuffers)
 #define NEVER_INLINE __declspec(noinline)
 #define FORCE_INLINE __forceinline
-#else
-#define ASSUME(cond) do { if (!(cond)) __builtin_unreachable(); } while (0)
-#define LIKELY(cond) __builtin_expect(!!(cond), 1)
-#define UNLIKELY(cond) __builtin_expect(!!(cond), 0)
+#define RESTRICT __restrict
+
+#else // not _MSC_VER
+
+#ifdef __clang__
+#if defined(__has_builtin) && __has_builtin(__builtin_assume)
+#pragma clang diagnostic ignored "-Wassume" // ignore the clang "side-effects ignored" warning
+#define ASSUME(...) __builtin_assume(!!(__VA_ARGS__)) // __builtin_assume (supported by modern clang) ignores side-effects
+#endif
+#endif
+
+#ifndef ASSUME // gcc and old clang
+#define ASSUME(...) do { if (!(__VA_ARGS__)) __builtin_unreachable(); } while (0)  // note: the compiler will generate code to evaluate "cond" if the expression is opaque
+#endif
+
 #define SAFE_BUFFERS
 #define NEVER_INLINE __attribute__((noinline))
 #define FORCE_INLINE __attribute__((always_inline)) inline
-#endif
+#define RESTRICT __restrict__
+
+#endif // _MSC_VER
 
 #define CHECK_SIZE(type, size) static_assert(sizeof(type) == size, "Invalid " #type " type size")
 #define CHECK_ALIGN(type, align) static_assert(alignof(type) == align, "Invalid " #type " type alignment")
 #define CHECK_MAX_SIZE(type, size) static_assert(sizeof(type) <= size, #type " type size is too big")
 #define CHECK_SIZE_ALIGN(type, size, align) CHECK_SIZE(type, size); CHECK_ALIGN(type, align)
 
-// Return 32 bit sizeof() to avoid widening/narrowing conversions with size_t
-#define SIZE_32(...) static_cast<u32>(sizeof(__VA_ARGS__))
-
-// Return 32 bit alignof() to avoid widening/narrowing conversions with size_t
-#define ALIGN_32(...) static_cast<u32>(alignof(__VA_ARGS__))
+// Variant pattern matching helper
+#define MATCH(arg, ...) constexpr(std::is_same_v<std::decay_t<decltype(arg)>, __VA_ARGS__>)
 
 #define CONCATENATE_DETAIL(x, y) x ## y
 #define CONCATENATE(x, y) CONCATENATE_DETAIL(x, y)
@@ -53,13 +69,35 @@
 
 #define HERE "\n(in file " __FILE__ ":" STRINGIZE(__LINE__) ")"
 
-// Ensure that the expression evaluates to true. Obsolete.
-//#define EXPECTS(...) do { if (!(__VA_ARGS__)) fmt::raw_error("Precondition failed: " #__VA_ARGS__ HERE); } while (0)
-//#define ENSURES(...) do { if (!(__VA_ARGS__)) fmt::raw_error("Postcondition failed: " #__VA_ARGS__ HERE); } while (0)
-
 #define DECLARE(...) decltype(__VA_ARGS__) __VA_ARGS__
 
 #define STR_CASE(...) case __VA_ARGS__: return #__VA_ARGS__
+
+
+#define ASSERT(...) do { if(!(__VA_ARGS__)) fmt::raw_error("Assertion failed: " STRINGIZE(__VA_ARGS__) HERE); } while(0)
+
+#if defined(_DEBUG) || defined(_AUDIT)
+#define AUDIT(...) ASSERT(__VA_ARGS__)
+#else
+#define AUDIT(...) ((void)0)
+#endif
+
+#if __cpp_lib_bit_cast >= 201806L
+#include <bit>
+#else
+namespace std
+{
+	template <class To, class From, typename = std::enable_if_t<sizeof(To) == sizeof(From)>>
+	constexpr To bit_cast(const From& from) noexcept
+	{
+		static_assert(sizeof(To) == sizeof(From), "std::bit_cast<>: incompatible type size");
+
+		To result{};
+		std::memcpy(&result, &from, sizeof(From));
+		return result;
+	}
+}
+#endif
 
 using schar  = signed char;
 using uchar  = unsigned char;
@@ -69,7 +107,11 @@ using ulong  = unsigned long;
 using ullong = unsigned long long;
 using llong  = long long;
 
+#if __APPLE__
+using uptr = std::uint64_t;
+#else
 using uptr = std::uintptr_t;
+#endif
 
 using u8  = std::uint8_t;
 using u16 = std::uint16_t;
@@ -85,10 +127,45 @@ using steady_clock = std::conditional<
     std::chrono::high_resolution_clock::is_steady,
     std::chrono::high_resolution_clock, std::chrono::steady_clock>::type;
 
-namespace gsl
+// Get integral type from type size
+template <std::size_t N>
+struct get_int_impl
 {
-	enum class byte : u8;
-}
+};
+
+template <>
+struct get_int_impl<sizeof(u8)>
+{
+	using utype = u8;
+	using stype = s8;
+};
+
+template <>
+struct get_int_impl<sizeof(u16)>
+{
+	using utype = u16;
+	using stype = s16;
+};
+
+template <>
+struct get_int_impl<sizeof(u32)>
+{
+	using utype = u32;
+	using stype = s32;
+};
+
+template <>
+struct get_int_impl<sizeof(u64)>
+{
+	using utype = u64;
+	using stype = s64;
+};
+
+template <std::size_t N>
+using get_uint_t = typename get_int_impl<N>::utype;
+
+template <std::size_t N>
+using get_sint_t = typename get_int_impl<N>::stype;
 
 // Formatting helper, type-specific preprocessing for improving safety and functionality
 template <typename T, typename = void>
@@ -105,69 +182,8 @@ namespace fmt
 	const fmt_type_info* get_type_info();
 }
 
-template <typename T, std::size_t Align = alignof(T), std::size_t Size = sizeof(T)>
-struct se_storage;
-
-template <typename T, bool Se = true, std::size_t Align = alignof(T)>
-class se_t;
-
-template <typename T, std::size_t Size = sizeof(T)>
-struct atomic_storage;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_add;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_sub;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_and;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_or;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_xor;
-
-template <typename T, typename = void>
-struct atomic_pre_inc;
-
-template <typename T, typename = void>
-struct atomic_post_inc;
-
-template <typename T, typename = void>
-struct atomic_pre_dec;
-
-template <typename T, typename = void>
-struct atomic_post_dec;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_test_and_set;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_test_and_reset;
-
-template <typename T1, typename T2, typename = void>
-struct atomic_test_and_complement;
-
 template <typename T>
 class atomic_t;
-
-#ifdef _MSC_VER
-using std::void_t;
-#else
-namespace void_details
-{
-	template <typename...>
-	struct make_void
-	{
-		using type = void;
-	};
-}
-
-template <typename... T>
-using void_t = typename void_details::make_void<T...>::type;
-#endif
 
 // Extract T::simple_type if available, remove cv qualifiers
 template <typename T, typename = void>
@@ -177,7 +193,7 @@ struct simple_type_helper
 };
 
 template <typename T>
-struct simple_type_helper<T, void_t<typename T::simple_type>>
+struct simple_type_helper<T, std::void_t<typename T::simple_type>>
 {
 	using type = typename T::simple_type;
 };
@@ -201,22 +217,6 @@ public:
 	constexpr operator bool() const
 	{
 		return m_value != 0;
-	}
-};
-
-// Bool wrapper for restricting bool result conversions
-struct explicit_bool_t
-{
-	const bool value;
-
-	constexpr explicit_bool_t(bool value)
-		: value(value)
-	{
-	}
-
-	explicit constexpr operator bool() const
-	{
-		return value;
 	}
 };
 
@@ -409,6 +409,51 @@ struct alignas(16) s128
 CHECK_SIZE_ALIGN(u128, 16, 16);
 CHECK_SIZE_ALIGN(s128, 16, 16);
 
+// Return magic value for any unsigned type
+constexpr inline struct umax_helper
+{
+	constexpr umax_helper() noexcept = default;
+
+	template <typename T, typename S = simple_t<T>, typename = std::enable_if_t<std::is_unsigned_v<S>>>
+	explicit constexpr operator T() const
+	{
+		return std::numeric_limits<S>::max();
+	}
+
+	template <typename T, typename S = simple_t<T>, typename = std::enable_if_t<std::is_unsigned_v<S>>>
+	constexpr bool operator==(const T& rhs) const
+	{
+		return rhs == std::numeric_limits<S>::max();
+	}
+
+#if __cpp_impl_three_way_comparison >= 201711 && !__INTELLISENSE__
+#else
+	template <typename T>
+	friend constexpr std::enable_if_t<std::is_unsigned_v<simple_t<T>>, bool> operator==(const T& lhs, const umax_helper& rhs)
+	{
+		return lhs == std::numeric_limits<simple_t<T>>::max();
+	}
+#endif
+
+#if __cpp_impl_three_way_comparison >= 201711
+#else
+	template <typename T, typename S = simple_t<T>, typename = std::enable_if_t<std::is_unsigned_v<S>>>
+	constexpr bool operator!=(const T& rhs) const
+	{
+		return rhs != std::numeric_limits<S>::max();
+	}
+
+	template <typename T>
+	friend constexpr std::enable_if_t<std::is_unsigned_v<simple_t<T>>, bool> operator!=(const T& lhs, const umax_helper& rhs)
+	{
+		return lhs != std::numeric_limits<simple_t<T>>::max();
+	}
+#endif
+} umax;
+
+using f32 = float;
+using f64 = double;
+
 union alignas(2) f16
 {
 	u16 _u16;
@@ -419,47 +464,54 @@ union alignas(2) f16
 		_u16 = raw;
 	}
 
-	explicit operator float() const
+	explicit operator f32() const
 	{
 		// See http://stackoverflow.com/a/26779139
 		// The conversion doesn't handle NaN/Inf
 		u32 raw = ((_u16 & 0x8000) << 16) |             // Sign (just moved)
 		          (((_u16 & 0x7c00) + 0x1C000) << 13) | // Exponent ( exp - 15 + 127)
 		          ((_u16 & 0x03FF) << 13);              // Mantissa
-		return (float&)raw;
+
+		return std::bit_cast<f32>(raw);
 	}
 };
 
 CHECK_SIZE_ALIGN(f16, 2, 2);
 
-using f32 = float;
-using f64 = double;
-
-struct ignore
+template <typename T, typename = std::enable_if_t<std::is_integral<T>::value && std::is_unsigned<T>::value>>
+constexpr T align(T value, ullong align)
 {
-	template <typename T>
-	ignore(T)
-	{
-	}
-};
+	return static_cast<T>((value + (align - 1)) & (0 - align));
+}
 
+// General purpose aligned division, the result is rounded up not truncated
+template <typename T, typename = std::enable_if_t<std::is_integral<T>::value && std::is_unsigned<T>::value>>
+constexpr T aligned_div(T value, ullong align)
+{
+	return static_cast<T>((value + align - 1) / align);
+}
+
+// General purpose aligned division, the result is rounded to nearest
 template <typename T, typename = std::enable_if_t<std::is_integral<T>::value>>
-constexpr T align(const T& value, ullong align)
+constexpr T rounded_div(T value, std::conditional_t<std::is_signed<T>::value, llong, ullong> align)
 {
-	return static_cast<T>((value + (align - 1)) & ~(align - 1));
+	if constexpr (std::is_unsigned<T>::value)
+	{
+		return static_cast<T>((value + (align / 2)) / align);
+	}
+
+	return static_cast<T>((value + (value < 0 ? 0 - align : align) / 2) / align);
 }
 
 template <typename T, typename T2>
 inline u32 offset32(T T2::*const mptr)
 {
 #ifdef _MSC_VER
-	static_assert(sizeof(mptr) == sizeof(u32), "Invalid pointer-to-member size");
-	return reinterpret_cast<const u32&>(mptr);
+	return std::bit_cast<u32>(mptr);
 #elif __GNUG__
-	static_assert(sizeof(mptr) == sizeof(std::size_t), "Invalid pointer-to-member size");
-	return static_cast<u32>(reinterpret_cast<const std::size_t&>(mptr));
+	return std::bit_cast<std::size_t>(mptr);
 #else
-	static_assert(sizeof(mptr) == 0, "Invalid pointer-to-member size");
+	static_assert(sizeof(mptr) == 0, "Unsupported pointer-to-member size");
 #endif
 }
 
@@ -471,7 +523,7 @@ struct offset32_array
 	template <typename Arg>
 	static inline u32 index32(const Arg& arg)
 	{
-		return SIZE_32(std::remove_extent_t<T>) * static_cast<u32>(arg);
+		return u32{sizeof(std::remove_extent_t<T>)} * static_cast<u32>(arg);
 	}
 };
 
@@ -481,7 +533,7 @@ struct offset32_array<std::array<T, N>>
 	template <typename Arg>
 	static inline u32 index32(const Arg& arg)
 	{
-		return SIZE_32(T) * static_cast<u32>(arg);
+		return u32{sizeof(T)} * static_cast<u32>(arg);
 	}
 };
 
@@ -514,77 +566,62 @@ struct offset32_detail<T3 T4::*>
 	}
 };
 
-inline u32 cntlz32(u32 arg, bool nonzero = false)
-{
-#ifdef _MSC_VER
-	ulong res;
-	return _BitScanReverse(&res, arg) || nonzero ? res ^ 31 : 32;
-#else
-	return arg || nonzero ? __builtin_clzll(arg) - 32 : 32;
-#endif
-}
-
-inline u64 cntlz64(u64 arg, bool nonzero = false)
-{
-#ifdef _MSC_VER
-	ulong res;
-	return _BitScanReverse64(&res, arg) || nonzero ? res ^ 63 : 64;
-#else
-	return arg || nonzero ? __builtin_clzll(arg) : 64;
-#endif
-}
-
-inline u32 cnttz32(u32 arg, bool nonzero = false)
-{
-#ifdef _MSC_VER
-	ulong res;
-	return _BitScanForward(&res, arg) || nonzero ? res : 32;
-#else
-	return arg || nonzero ? __builtin_ctzll(arg) : 32;
-#endif
-}
-
-inline u64 cnttz64(u64 arg, bool nonzero = false)
-{
-#ifdef _MSC_VER
-	ulong res;
-	return _BitScanForward64(&res, arg) || nonzero ? res : 64;
-#else
-	return arg || nonzero ? __builtin_ctzll(arg) : 64;
-#endif
-}
-
 // Helper function, used by ""_u16, ""_u32, ""_u64
-constexpr u8 to_u8(char c)
+constexpr u32 to_u8(char c)
 {
 	return static_cast<u8>(c);
 }
 
-// Convert 2-byte string to u16 value like reinterpret_cast does
-constexpr u16 operator""_u16(const char* s, std::size_t length)
+// Convert 1-2-byte string to u16 value like reinterpret_cast does
+constexpr u16 operator""_u16(const char* s, std::size_t /*length*/)
 {
-	return length != 2 ? throw s :
-#if IS_LE_MACHINE == 1
-		to_u8(s[1]) << 8 | to_u8(s[0]);
-#endif
+	if constexpr (std::endian::little == std::endian::native)
+	{
+		return static_cast<u16>(to_u8(s[1]) << 8 | to_u8(s[0]));
+	}
+	else
+	{
+		return static_cast<u16>(to_u8(s[0]) << 8 | to_u8(s[1]));
+	}
 }
 
-// Convert 4-byte string to u32 value like reinterpret_cast does
-constexpr u32 operator""_u32(const char* s, std::size_t length)
+// Convert 3-4-byte string to u32 value like reinterpret_cast does
+constexpr u32 operator""_u32(const char* s, std::size_t /*length*/)
 {
-	return length != 4 ? throw s :
-#if IS_LE_MACHINE == 1
-		to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
-#endif
+	if constexpr (std::endian::little == std::endian::native)
+	{
+		return to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
+	}
+	else
+	{
+		return to_u8(s[0]) << 24 | to_u8(s[1]) << 16 | to_u8(s[2]) << 8 | to_u8(s[3]);
+	}
 }
 
-// Convert 8-byte string to u64 value like reinterpret_cast does
-constexpr u64 operator""_u64(const char* s, std::size_t length)
+// Convert 5-6-byte string to u64 value like reinterpret_cast does
+constexpr u64 operator""_u48(const char* s, std::size_t /*length*/)
 {
-	return length != 8 ? throw s :
-#if IS_LE_MACHINE == 1
-		static_cast<u64>(to_u8(s[7]) << 24 | to_u8(s[6]) << 16 | to_u8(s[5]) << 8 | to_u8(s[4])) << 32 | to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
-#endif
+	if constexpr (std::endian::little == std::endian::native)
+	{
+		return static_cast<u64>(to_u8(s[5]) << 8 | to_u8(s[4])) << 32 | to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
+	}
+	else
+	{
+		return static_cast<u64>(to_u8(s[0]) << 8 | to_u8(s[1])) << 32 | to_u8(s[2]) << 24 | to_u8(s[3]) << 16 | to_u8(s[4]) << 8 | to_u8(s[5]);
+	}
+}
+
+// Convert 7-8-byte string to u64 value like reinterpret_cast does
+constexpr u64 operator""_u64(const char* s, std::size_t /*length*/)
+{
+	if constexpr (std::endian::little == std::endian::native)
+	{
+		return static_cast<u64>(to_u8(s[7]) << 24 | to_u8(s[6]) << 16 | to_u8(s[5]) << 8 | to_u8(s[4])) << 32 | to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
+	}
+	else
+	{
+		return static_cast<u64>(to_u8(s[0]) << 24 | to_u8(s[1]) << 16 | to_u8(s[2]) << 8 | to_u8(s[3])) << 32 | to_u8(s[4]) << 24 | to_u8(s[5]) << 16 | to_u8(s[6]) << 8 | to_u8(s[7]);
+	}
 }
 
 namespace fmt
@@ -725,7 +762,7 @@ struct narrow_impl<From, To, std::enable_if_t<std::is_signed<From>::value && std
 
 // Simple type enabled (TODO: allow for To as well)
 template <typename From, typename To>
-struct narrow_impl<From, To, void_t<typename From::simple_type>>
+struct narrow_impl<From, To, std::void_t<typename From::simple_type>>
 	: narrow_impl<simple_t<From>, To>
 {
 };
@@ -757,42 +794,6 @@ constexpr u32 size32(const T (&)[Size], const char* msg = nullptr)
 	return static_cast<u32>(Size);
 }
 
-template <typename T1, typename = std::enable_if_t<std::is_integral<T1>::value>>
-constexpr bool test(const T1& value)
-{
-	return value != 0;
-}
-
-template <typename T1, typename T2, typename = std::enable_if_t<std::is_integral<T1>::value && std::is_integral<T2>::value>>
-constexpr bool test(const T1& lhs, const T2& rhs)
-{
-	return (lhs & rhs) != 0;
-}
-
-template <typename T, typename T2, typename = std::enable_if_t<std::is_integral<T>::value && std::is_integral<T2>::value>>
-inline bool test_and_set(T& lhs, const T2& rhs)
-{
-	const bool result = (lhs & rhs) != 0;
-	lhs |= rhs;
-	return result;
-}
-
-template <typename T, typename T2, typename = std::enable_if_t<std::is_integral<T>::value && std::is_integral<T2>::value>>
-inline bool test_and_reset(T& lhs, const T2& rhs)
-{
-	const bool result = (lhs & rhs) != 0;
-	lhs &= ~rhs;
-	return result;
-}
-
-template <typename T, typename T2, typename = std::enable_if_t<std::is_integral<T>::value && std::is_integral<T2>::value>>
-inline bool test_and_complement(T& lhs, const T2& rhs)
-{
-	const bool result = (lhs & rhs) != 0;
-	lhs ^= rhs;
-	return result;
-}
-
 // Simplified hash algorithm for pointers. May be used in std::unordered_(map|set).
 template <typename T, std::size_t Align = alignof(T)>
 struct pointer_hash
@@ -817,7 +818,7 @@ struct value_hash
 template <template <typename> class TT, std::size_t S, std::size_t A = S>
 struct alignas(A) any_pod
 {
-	std::aligned_storage_t<S, A> data;
+	alignas(A) std::byte data[S];
 
 	any_pod() = default;
 
@@ -900,35 +901,6 @@ struct cmd64 : any64
 
 static_assert(sizeof(cmd64) == 8 && std::is_pod<cmd64>::value, "Incorrect cmd64 type");
 
-// Allows to define integer convertible to multiple types
-template <typename T, T Value, typename T1 = void, typename... Ts>
-struct multicast : multicast<T, Value, Ts...>
-{
-	constexpr multicast()
-		: multicast<T, Value, Ts...>()
-	{
-	}
-
-	// Implicit conversion to desired type
-	constexpr operator T1() const
-	{
-		return static_cast<T1>(Value);
-	}
-};
-
-// Recursion terminator
-template <typename T, T Value>
-struct multicast<T, Value, void>
-{
-	constexpr multicast() = default;
-
-	// Explicit conversion to base type
-	explicit constexpr operator T() const
-	{
-		return Value;
-	}
-};
-
 // Error code type (return type), implements error reporting. Could be a template.
 struct error_code
 {
@@ -953,26 +925,23 @@ struct error_code
 	};
 
 	template<typename ET>
-	struct is_error<ET, void_t<decltype(ET::__not_an_error)>> : std::false_type
+	struct is_error<ET, std::enable_if_t<sizeof(ET::__not_an_error) != 0>> : std::false_type
 	{
 	};
 
-	// Not an error constructor
-	template<typename ET, typename = decltype(ET::__not_an_error)>
-	error_code(const ET& value, std::nullptr_t = nullptr)
+	// Common constructor
+	template<typename ET>
+	error_code(const ET& value)
 		: value(static_cast<s32>(value))
 	{
-	}
-
-	// Error constructor
-	template<typename ET, typename = std::enable_if_t<is_error<ET>::value>>
-	error_code(const ET& value)
-		: value(error_report(fmt::get_type_info<fmt_unveil_t<ET>>(), fmt_unveil<ET>::get(value), nullptr, 0))
-	{
+		if constexpr(is_error<ET>::value)
+		{
+			this->value = error_report(fmt::get_type_info<fmt_unveil_t<ET>>(), fmt_unveil<ET>::get(value), nullptr, 0);
+		}
 	}
 
 	// Error constructor (2 args)
-	template<typename ET, typename T2, typename = std::enable_if_t<is_error<ET>::value>>
+	template<typename ET, typename T2>
 	error_code(const ET& value, const T2& value2)
 		: value(error_report(fmt::get_type_info<fmt_unveil_t<ET>>(), fmt_unveil<ET>::get(value), fmt::get_type_info<fmt_unveil_t<T2>>(), fmt_unveil<T2>::get(value2)))
 	{
@@ -998,88 +967,33 @@ inline void busy_wait(std::size_t cycles = 3000)
 	do _mm_pause(); while (__rdtsc() - s < cycles);
 }
 
-// Rotate helpers
-#if defined(__GNUG__)
-
-inline u8 rol8(u8 x, u8 n)
+// TODO: Remove when moving to c++20
+template <typename T>
+inline constexpr uintmax_t floor2(T value)
 {
-	u8 result = x;
-	__asm__("rolb %[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
+	value >>= 1;
+
+	for (uintmax_t i = 0;; i++, value >>= 1)
+	{
+		if (value == 0)
+		{
+			return i;
+		}
+	}
 }
 
-inline u8 ror8(u8 x, u8 n)
+template <typename T>
+inline constexpr uintmax_t ceil2(T value)
 {
-	u8 result = x;
-	__asm__("rorb %[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
+	const uintmax_t ispow2 = value & (value - 1); // if power of 2 the result is 0
 
-inline u16 rol16(u16 x, u16 n)
-{
-	u16 result = x;
-	__asm__("rolw %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
+	value >>= 1;
 
-inline u16 ror16(u16 x, u16 n)
-{
-	u16 result = x;
-	__asm__("rorw %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
+	for (uintmax_t i = 0;; i++, value >>= 1)
+	{
+		if (value == 0)
+		{
+			return i + std::min<uintmax_t>(ispow2, 1);
+		}
+	}
 }
-
-inline u32 rol32(u32 x, u32 n)
-{
-	u32 result = x;
-	__asm__("roll %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
-
-inline u32 ror32(u32 x, u32 n)
-{
-	u32 result = x;
-	__asm__("rorl %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
-
-inline u64 rol64(u64 x, u64 n)
-{
-	u64 result = x;
-	__asm__("rolq %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
-
-inline u64 ror64(u64 x, u64 n)
-{
-	u64 result = x;
-	__asm__("rorq %b[n], %[result]" : [result] "+g" (result) : [n] "c" (n));
-	return result;
-}
-
-inline u64 umulh64(u64 a, u64 b)
-{
-	u64 result;
-	__asm__("mulq %[b]" : "=d" (result) : [a] "a" (a), [b] "rm" (b));
-	return result;
-}
-
-inline s64 mulh64(s64 a, s64 b)
-{
-	s64 result;
-	__asm__("imulq %[b]" : "=d" (result) : [a] "a" (a), [b] "rm" (b));
-	return result;
-}
-
-#elif defined(_MSC_VER)
-inline u8 rol8(u8 x, u8 n) { return _rotl8(x, n); }
-inline u8 ror8(u8 x, u8 n) { return _rotr8(x, n); }
-inline u16 rol16(u16 x, u16 n) { return _rotl16(x, (u8)n); }
-inline u16 ror16(u16 x, u16 n) { return _rotr16(x, (u8)n); }
-inline u32 rol32(u32 x, u32 n) { return _rotl(x, (int)n); }
-inline u32 ror32(u32 x, u32 n) { return _rotr(x, (int)n); }
-inline u64 rol64(u64 x, u64 n) { return _rotl64(x, (int)n); }
-inline u64 ror64(u64 x, u64 n) { return _rotr64(x, (int)n); }
-inline u64 umulh64(u64 x, u64 y) { return __umulh(x, y); }
-inline s64 mulh64(s64 x, s64 y) { return __mulh(x, y); }
-#endif

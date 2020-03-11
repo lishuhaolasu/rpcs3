@@ -1,8 +1,7 @@
 ﻿#include "stdafx.h"
-#include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 
-logs::channel libmedi("libmedi");
+LOG_CHANNEL(libmedi);
 
 s32 cellMediatorCloseContext()
 {

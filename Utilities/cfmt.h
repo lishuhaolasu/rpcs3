@@ -1,10 +1,13 @@
 #pragma once
 
 #include "types.h"
+#include "asm.h"
 #include <climits>
 #include <string>
 #include <vector>
 #include <algorithm>
+
+static const size_t size_dropped = std::numeric_limits<size_t>::max();
 
 /*
 C-style format parser. Appends formatted string to `out`, returns number of characters written.
@@ -40,7 +43,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	const auto drop_sequence = [&]
 	{
 		out.insert(out.end(), fmt - ctx.size, fmt);
-		ctx.size = -1;
+		ctx.size = size_dropped;
 	};
 
 	const auto read_decimal = [&](uint result) -> uint
@@ -56,7 +59,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	const auto write_octal = [&](u64 value, u64 min_num)
 	{
-		out.resize(out.size() + std::max<u64>(min_num, 66 / 3 - (cntlz64(value | 1, true) + 2) / 3), '0');
+		out.resize(out.size() + std::max<u64>(min_num, 66 / 3 - (utils::cntlz64(value | 1, true) + 2) / 3), '0');
 
 		// Write in reversed order
 		for (auto i = out.rbegin(); value; i++, value /= 8)
@@ -67,8 +70,8 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	const auto write_hex = [&](u64 value, bool upper, u64 min_num)
 	{
-		out.resize(out.size() + std::max<u64>(min_num, 64 / 4 - cntlz64(value | 1, true) / 4), '0');
-		
+		out.resize(out.size() + std::max<u64>(min_num, 64 / 4 - utils::cntlz64(value | 1, true) / 4), '0');
+
 		// Write in reversed order
 		for (auto i = out.rbegin(); value; i++, value /= 16)
 		{
@@ -111,7 +114,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		ctx = {0};
 		out.push_back(ch);
 	}
-	else if (ctx.size == -1)
+	else if (ctx.size == size_dropped)
 	{
 		out.push_back(ch);
 	}
@@ -133,7 +136,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	case '8':
 	case '9':
 	{
-		if (UNLIKELY(ctx.width))
+		if (ctx.width) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -141,13 +144,13 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		{
 			ctx.width = read_decimal(ch - '0');
 		}
-		
+
 		break;
 	}
 
 	case '*':
 	{
-		if (UNLIKELY(ctx.width || !src.test(ctx.args)))
+		if (ctx.width || !src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -157,13 +160,13 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 			ctx.width = std::abs(warg);
 			ctx.left |= warg < 0;
 		}
-		
+
 		break;
 	}
 
 	case '.':
 	{
-		if (UNLIKELY(ctx.dot || ctx.prec))
+		if (ctx.dot || ctx.prec) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -174,7 +177,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		}
 		else if (*fmt == '*')
 		{
-			if (UNLIKELY(!src.test(ctx.args)))
+			if (!src.test(ctx.args)) [[unlikely]]
 			{
 				drop_sequence();
 			}
@@ -197,7 +200,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'h':
 	{
-		if (UNLIKELY(ctx.type))
+		if (ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -216,7 +219,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'l':
 	{
-		if (UNLIKELY(ctx.type))
+		if (ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -235,7 +238,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'z':
 	{
-		if (UNLIKELY(ctx.type))
+		if (ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -249,7 +252,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'j':
 	{
-		if (UNLIKELY(ctx.type))
+		if (ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -263,7 +266,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 't':
 	{
-		if (UNLIKELY(ctx.type))
+		if (ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 		}
@@ -277,7 +280,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'c':
 	{
-		if (UNLIKELY(ctx.type || !src.test(ctx.args)))
+		if (ctx.type || !src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -299,7 +302,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 's':
 	{
-		if (UNLIKELY(ctx.type || !src.test(ctx.args)))
+		if (ctx.type || !src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -307,7 +310,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 		const std::size_t start = out.size();
 		const std::size_t size1 = src.fmt_string(out, ctx.args);
-		
+
 		if (ctx.dot && size1 > ctx.prec)
 		{
 			// Shrink if necessary
@@ -330,7 +333,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	case 'd':
 	case 'i':
 	{
-		if (UNLIKELY(!src.test(ctx.args)))
+		if (!src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -338,7 +341,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 		if (!ctx.type)
 		{
-			ctx.type = (u8)src.type(ctx.args);
+			ctx.type = static_cast<u8>(src.type(ctx.args));
 
 			if (!ctx.type)
 			{
@@ -392,7 +395,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'o':
 	{
-		if (UNLIKELY(!src.test(ctx.args)))
+		if (!src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -400,7 +403,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 		if (!ctx.type)
 		{
-			ctx.type = (u8)src.type(ctx.args);
+			ctx.type = static_cast<u8>(src.type(ctx.args));
 
 			if (!ctx.type)
 			{
@@ -409,9 +412,10 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		}
 
 		const u64 mask =
-			ctx.type == 1 ? 0xffull :
-			ctx.type == 2 ? 0xffffull :
-			ctx.type == 4 ? 0xffffffffull : 0xffffffffffffffffull;
+			ctx.type == 1 ? 0xff :
+			ctx.type == 2 ? 0xffff :
+			ctx.type == 4 ? 0xffff'ffffu :
+			0xffff'ffff'ffff'ffffu;
 
 		// Trunc sign-extended signed types
 		const u64 val = src.template get<u64>(ctx.args) & mask;
@@ -448,7 +452,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	case 'x':
 	case 'X':
 	{
-		if (UNLIKELY(!src.test(ctx.args)))
+		if (!src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -456,7 +460,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 		if (!ctx.type)
 		{
-			ctx.type = (u8)src.type(ctx.args);
+			ctx.type = static_cast<u8>(src.type(ctx.args));
 
 			if (!ctx.type)
 			{
@@ -465,9 +469,10 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		}
 
 		const u64 mask =
-			ctx.type == 1 ? 0xffull :
-			ctx.type == 2 ? 0xffffull :
-			ctx.type == 4 ? 0xffffffffull : 0xffffffffffffffffull;
+			ctx.type == 1 ? 0xff :
+			ctx.type == 2 ? 0xffff :
+			ctx.type == 4 ? 0xffff'ffffu :
+			0xffff'ffff'ffff'ffffu;
 
 		// Trunc sign-extended signed types
 		const u64 val = src.template get<u64>(ctx.args) & mask;
@@ -511,7 +516,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'u':
 	{
-		if (UNLIKELY(!src.test(ctx.args)))
+		if (!src.test(ctx.args)) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -519,7 +524,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 		if (!ctx.type)
 		{
-			ctx.type = (u8)src.type(ctx.args);
+			ctx.type = static_cast<u8>(src.type(ctx.args));
 
 			if (!ctx.type)
 			{
@@ -528,9 +533,10 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 		}
 
 		const u64 mask =
-			ctx.type == 1 ? 0xffull :
-			ctx.type == 2 ? 0xffffull :
-			ctx.type == 4 ? 0xffffffffull : 0xffffffffffffffffull;
+			ctx.type == 1 ? 0xff :
+			ctx.type == 2 ? 0xffff :
+			ctx.type == 4 ? 0xffff'ffffu :
+			0xffff'ffff'ffff'ffffu;
 
 		// Trunc sign-extended signed types
 		const u64 val = src.template get<u64>(ctx.args) & mask;
@@ -557,7 +563,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 
 	case 'p':
 	{
-		if (UNLIKELY(!src.test(ctx.args) || ctx.type))
+		if (!src.test(ctx.args) || ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -576,7 +582,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 			// Add padding if necessary
 			out.insert(ctx.left ? out.end() : out.begin() + start, ctx.width - size2, ' ');
 		}
-		
+
 		src.skip(ctx.args);
 		ctx = {0};
 		break;
@@ -591,7 +597,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	case 'g':
 	case 'G':
 	{
-		if (UNLIKELY(!src.test(ctx.args) || ctx.type))
+		if (!src.test(ctx.args) || ctx.type) [[unlikely]]
 		{
 			drop_sequence();
 			break;
@@ -625,7 +631,7 @@ std::size_t cfmt_append(Dst& out, const Char* fmt, Src&& src)
 	}
 
 	// Handle unfinished sequence
-	if (ctx.size && ctx.size != -1)
+	if (ctx.size && ctx.size != size_dropped)
 	{
 		fmt--, drop_sequence();
 	}

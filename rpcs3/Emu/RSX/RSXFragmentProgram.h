@@ -1,6 +1,7 @@
-#pragma once
-#include "GCM.h"
-#include "RSXTexture.h"
+﻿#pragma once
+
+#include "gcm_enums.h"
+#include "Utilities/types.h"
 
 enum register_type
 {
@@ -8,6 +9,16 @@ enum register_type
 	RSX_FP_REGISTER_TYPE_INPUT = 1,
 	RSX_FP_REGISTER_TYPE_CONSTANT = 2,
 	RSX_FP_REGISTER_TYPE_UNKNOWN = 3,
+};
+
+enum register_precision
+{
+	RSX_FP_PRECISION_REAL = 0,
+	RSX_FP_PRECISION_HALF = 1,
+	RSX_FP_PRECISION_FIXED12 = 2,
+	RSX_FP_PRECISION_FIXED9 = 3,
+	RSX_FP_PRECISION_SATURATE = 4,
+	RSX_FP_PRECISION_UNKNOWN = 5 // Unknown what this actually does; seems to do nothing on hwtests but then why would their compiler emit it?
 };
 
 enum fp_opcode
@@ -216,21 +227,18 @@ static const std::string rsx_fp_op_names[] =
 
 struct RSXFragmentProgram
 {
-	u32 size;
 	void *addr;
 	u32 offset;
+	u32 ucode_length;
 	u32 ctrl;
 	u16 unnormalized_coords;
 	u16 redirected_textures;
 	u16 shadow_textures;
-	bool front_back_color_enabled : 1;
-	bool back_color_diffuse_output : 1;
-	bool back_color_specular_output : 1;
-	bool front_color_diffuse_output : 1;
-	bool front_color_specular_output : 1;
+	bool two_sided_lighting;
 	u32 texture_dimensions;
+	u32 texcoord_control_mask;
 
-	std::array<float, 4> texture_scale[16];
+	float texture_scale[16][4];
 	u8 textures_alpha_kill[16];
 	u8 textures_zfunc[16];
 
@@ -238,7 +246,18 @@ struct RSXFragmentProgram
 
 	rsx::texture_dimension_extended get_texture_dimension(u8 id) const
 	{
-		return (rsx::texture_dimension_extended)((texture_dimensions >> (id * 2)) & 0x3);
+		return rsx::texture_dimension_extended{static_cast<u8>((texture_dimensions >> (id * 2)) & 0x3)};
+	}
+
+	bool texcoord_is_2d(u8 index) const
+	{
+		return !!(texcoord_control_mask & (1u << index));
+	}
+
+	bool texcoord_is_point_coord(u8 index) const
+	{
+		index += 16;
+		return !!(texcoord_control_mask & (1u << index));
 	}
 
 	RSXFragmentProgram()

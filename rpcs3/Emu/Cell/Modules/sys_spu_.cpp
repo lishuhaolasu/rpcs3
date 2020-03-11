@@ -1,5 +1,5 @@
-#include "stdafx.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "Emu/VFS.h"
 #include "Emu/Cell/PPUModule.h"
 
 #include "Emu/Cell/RawSPUThread.h"
@@ -8,9 +8,7 @@
 #include "Loader/ELF.h"
 #include "sysPrxForUser.h"
 
-extern logs::channel sysPrxForUser;
-
-extern u64 get_system_time();
+LOG_CHANNEL(sysPrxForUser);
 
 spu_printf_cb_t g_spu_printf_agcb;
 spu_printf_cb_t g_spu_printf_dgcb;
@@ -141,9 +139,9 @@ struct spu_elf_info
 		// Check SCE header if found
 		std::memcpy(&sce0, src.get_ptr(), sizeof(sce0));
 
-		if (sce0.se_magic == 0x53434500 /* SCE\0 */)
+		if (sce0.se_magic == 0x53434500u /* SCE\0 */)
 		{
-			if (sce0.se_hver != 2 || sce0.se_type != 1 || sce0.se_meta == 0)
+			if (sce0.se_hver != 2u || sce0.se_type != 1u || sce0.se_meta == 0u)
 			{
 				return CELL_ENOEXEC;
 			}
@@ -152,7 +150,7 @@ struct spu_elf_info
 			ehdr_off = static_cast<u32>(+self.se_elfoff);
 			phdr_off = static_cast<u32>(+self.se_phdroff);
 
-			if (self.se_htype != 3 || !ehdr_off || !phdr_off)
+			if (self.se_htype != 3u || !ehdr_off || !phdr_off)
 			{
 				return CELL_ENOEXEC;
 			}
@@ -161,12 +159,12 @@ struct spu_elf_info
 		// Check ELF header
 		vm::ptr<elf_ehdr<elf_be, u32>> ehdr = vm::cast(src.addr() + ehdr_off);
 
-		if (ehdr->e_magic != "\177ELF"_u32 || ehdr->e_data != 2 /* BE */)
+		if (ehdr->e_magic != "\177ELF"_u32 || ehdr->e_data != 2u /* BE */)
 		{
 			return CELL_ENOEXEC;
 		}
 
-		if (ehdr->e_class != 1 && ehdr->e_class != 2)
+		if (ehdr->e_class != 1u && ehdr->e_class != 2u)
 		{
 			return CELL_ENOEXEC;
 		}
@@ -188,7 +186,7 @@ error_code sys_spu_elf_get_information(u32 elf_img, vm::ptr<u32> entry, vm::ptr<
 	sysPrxForUser.warning("sys_spu_elf_get_information(elf_img=0x%x, entry=*0x%x, nseg=*0x%x)", elf_img, entry, nseg);
 
 	// Initialize ELF loader
-	vm::var<spu_elf_info> info(spu_elf_info{});
+	vm::var<spu_elf_info> info({0});
 
 	if (auto res = info->init(vm::cast(elf_img)))
 	{
@@ -196,13 +194,13 @@ error_code sys_spu_elf_get_information(u32 elf_img, vm::ptr<u32> entry, vm::ptr<
 	}
 
 	// Reject SCE header
-	if (info->sce0.se_magic == 0x53434500)
+	if (info->sce0.se_magic == 0x53434500u)
 	{
 		return CELL_ENOEXEC;
 	}
 
 	// Load ELF header
-	vm::var<elf_ehdr<elf_be, u64>> ehdr(elf_ehdr<elf_be, u64>{});
+	vm::var<elf_ehdr<elf_be, u64>> ehdr({0});
 
 	if (info->ldr->get_ehdr(ehdr) || ehdr->e_machine != elf_machine::spu || !ehdr->e_phnum)
 	{
@@ -234,7 +232,7 @@ error_code sys_spu_elf_get_segments(u32 elf_img, vm::ptr<sys_spu_segment> segmen
 	sysPrxForUser.warning("sys_spu_elf_get_segments(elf_img=0x%x, segments=*0x%x, nseg=0x%x)", elf_img, segments, nseg);
 
 	// Initialize ELF loader
-	vm::var<spu_elf_info> info(spu_elf_info{});
+	vm::var<spu_elf_info> info({0});
 
 	if (auto res = info->init(vm::cast(elf_img)))
 	{
@@ -242,7 +240,7 @@ error_code sys_spu_elf_get_segments(u32 elf_img, vm::ptr<sys_spu_segment> segmen
 	}
 
 	// Load ELF header
-	vm::var<elf_ehdr<elf_be, u64>> ehdr(elf_ehdr<elf_be, u64>{});
+	vm::var<elf_ehdr<elf_be, u64>> ehdr({0});
 
 	if (info->ldr->get_ehdr(ehdr) || ehdr->e_machine != elf_machine::spu || !ehdr->e_phnum)
 	{
@@ -271,7 +269,7 @@ error_code sys_spu_elf_get_segments(u32 elf_img, vm::ptr<sys_spu_segment> segmen
 	return CELL_OK;
 }
 
-error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
+error_code sys_spu_image_import(ppu_thread& ppu, vm::ptr<sys_spu_image> img, u32 src, u32 type)
 {
 	sysPrxForUser.warning("sys_spu_image_import(img=*0x%x, src=0x%x, type=%d)", img, src, type);
 
@@ -281,7 +279,7 @@ error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
 	}
 
 	// Initialize ELF loader
-	vm::var<spu_elf_info> info(spu_elf_info{});
+	vm::var<spu_elf_info> info({0});
 
 	if (auto res = info->init(vm::cast(src)))
 	{
@@ -289,13 +287,13 @@ error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
 	}
 
 	// Reject SCE header
-	if (info->sce0.se_magic == 0x53434500)
+	if (info->sce0.se_magic == 0x53434500u)
 	{
 		return CELL_ENOEXEC;
 	}
 
 	// Load ELF header
-	vm::var<elf_ehdr<elf_be, u64>> ehdr(elf_ehdr<elf_be, u64>{});
+	vm::var<elf_ehdr<elf_be, u64>> ehdr({0});
 
 	if (info->ldr->get_ehdr(ehdr) || ehdr->e_machine != elf_machine::spu || !ehdr->e_phnum)
 	{
@@ -316,7 +314,7 @@ error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
 
 		for (const auto& p : phdr)
 		{
-			if (p.p_type != 1 && p.p_type != 4)
+			if (p.p_type != 1u && p.p_type != 4u)
 			{
 				return CELL_ENOEXEC;
 			}
@@ -324,7 +322,7 @@ error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
 			img_size = std::max<u32>(img_size, static_cast<u32>(p.p_offset + p.p_filesz));
 		}
 
-		return _sys_spu_image_import(img, src, img_size, 0);
+		return _sys_spu_image_import(ppu, img, src, img_size, 0);
 	}
 	else
 	{
@@ -357,7 +355,7 @@ error_code sys_spu_image_import(vm::ptr<sys_spu_image> img, u32 src, u32 type)
 	}
 }
 
-error_code sys_spu_image_close(vm::ptr<sys_spu_image> img)
+error_code sys_spu_image_close(ppu_thread& ppu, vm::ptr<sys_spu_image> img)
 {
 	sysPrxForUser.warning("sys_spu_image_close(img=*0x%x)", img);
 
@@ -369,7 +367,7 @@ error_code sys_spu_image_close(vm::ptr<sys_spu_image> img)
 	else if (img->type == SYS_SPU_IMAGE_TYPE_KERNEL)
 	{
 		// Call the syscall
-		return _sys_spu_image_close(img);
+		return _sys_spu_image_close(ppu, img);
 	}
 	else
 	{

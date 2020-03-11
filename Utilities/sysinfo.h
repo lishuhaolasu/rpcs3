@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "types.h"
 #include <string>
@@ -37,11 +37,27 @@ namespace utils
 
 	bool has_rtm();
 
+	bool has_tsx_force_abort();
+
 	bool has_mpx();
 
-	bool has_512();
+	bool has_avx512();
 
 	bool has_xop();
 
+	bool has_clwb();
+
+	std::string get_cpu_brand();
+
 	std::string get_system_info();
+
+	std::string get_firmware_version();
+
+	std::string get_OS_version();
+
+	ullong get_tsc_freq();
+
+	u64 get_total_memory();
+
+	u32 get_thread_count();
 }

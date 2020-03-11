@@ -1,7 +1,5 @@
-#pragma once
+﻿#pragma once
 
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
 #include "Emu/Cell/Modules/sceNpTrophy.h"
 
 #include <QWidget>

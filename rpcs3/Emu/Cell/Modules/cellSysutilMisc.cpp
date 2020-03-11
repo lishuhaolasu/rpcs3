@@ -1,8 +1,8 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 
-logs::channel cellSysutilMisc("cellSysutilMisc");
+LOG_CHANNEL(cellSysutilMisc);
 
 // License areas
 enum

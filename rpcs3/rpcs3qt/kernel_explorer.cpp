@@ -1,6 +1,4 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
 
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUThread.h"
@@ -11,19 +9,20 @@
 #include "Emu/Cell/lv2/sys_mutex.h"
 #include "Emu/Cell/lv2/sys_cond.h"
 #include "Emu/Cell/lv2/sys_semaphore.h"
-#include "Emu/Cell/lv2/sys_event.h"
 #include "Emu/Cell/lv2/sys_event_flag.h"
 #include "Emu/Cell/lv2/sys_rwlock.h"
 #include "Emu/Cell/lv2/sys_prx.h"
+#include "Emu/Cell/lv2/sys_overlay.h"
 #include "Emu/Cell/lv2/sys_memory.h"
-#include "Emu/Cell/lv2/sys_mmapper.h"
 #include "Emu/Cell/lv2/sys_spu.h"
-#include "Emu/Cell/lv2/sys_interrupt.h"
-#include "Emu/Cell/lv2/sys_timer.h"
 #include "Emu/Cell/lv2/sys_process.h"
 #include "Emu/Cell/lv2/sys_fs.h"
 
 #include "kernel_explorer.h"
+
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QHeaderView>
 
 kernel_explorer::kernel_explorer(QWidget* parent) : QDialog(parent)
 {
@@ -55,7 +54,7 @@ kernel_explorer::kernel_explorer(QWidget* parent) : QDialog(parent)
 	connect(button_refresh, &QAbstractButton::clicked, this, &kernel_explorer::Update);
 
 	Update();
-};
+}
 
 constexpr auto qstr = QString::fromStdString;
 
@@ -63,17 +62,17 @@ void kernel_explorer::Update()
 {
 	m_tree->clear();
 
-	const auto vm_block = vm::get(vm::user_space);
+	const auto dct = g_fxo->get<lv2_memory_container>();
 
-	if (!vm_block)
+	if (!dct)
 	{
 		return;
 	}
 
-	const u32 total_memory_usage = vm_block->used();
+	const u32 total_memory_usage = dct->used;
 
 	QTreeWidgetItem* root = new QTreeWidgetItem();
-	root->setText(0, qstr(fmt::format("Process, ID = 0x00000001, Total Memory Usage = 0x%x (%0.2f MB)", total_memory_usage, (float)total_memory_usage / (1024 * 1024))));
+	root->setText(0, qstr(fmt::format("Process, ID = 0x00000001, Total Memory Usage = 0x%x (%0.2f MB)", total_memory_usage, 1.f * total_memory_usage / (1024 * 1024))));
 	m_tree->addTopLevelItem(root);
 
 	union name64
@@ -82,8 +81,9 @@ void kernel_explorer::Update()
 		char string[8];
 
 		name64(u64 data)
-			: u64_data(data & 0x00ffffffffffffffull)
+			: u64_data(data)
 		{
+			string[7] = '\0';
 		}
 
 		const char* operator+() const
@@ -106,7 +106,7 @@ void kernel_explorer::Update()
 		}
 	};
 
-	auto l_addTreeChild = [=](QTreeWidgetItem *parent, QString text)
+	auto l_addTreeChild = [this](QTreeWidgetItem *parent, QString text)
 	{
 		QTreeWidgetItem *treeItem = new QTreeWidgetItem();
 		treeItem->setText(0, text);
@@ -115,23 +115,24 @@ void kernel_explorer::Update()
 	};
 
 	std::vector<lv2_obj_rec> lv2_types(256);
-	lv2_types[SYS_MEM_OBJECT] =									l_addTreeChild(root, "Memory");
-	lv2_types[SYS_MUTEX_OBJECT] =								l_addTreeChild(root, "Mutexes");
-	lv2_types[SYS_COND_OBJECT] =								l_addTreeChild(root, "Condition Variables");
-	lv2_types[SYS_RWLOCK_OBJECT] =							l_addTreeChild(root, "Reader Writer Locks");
-	lv2_types[SYS_INTR_TAG_OBJECT] =						l_addTreeChild(root, "Interrupt Tags");
+	lv2_types[SYS_MEM_OBJECT] =                 l_addTreeChild(root, "Memory");
+	lv2_types[SYS_MUTEX_OBJECT] =               l_addTreeChild(root, "Mutexes");
+	lv2_types[SYS_COND_OBJECT] =                l_addTreeChild(root, "Condition Variables");
+	lv2_types[SYS_RWLOCK_OBJECT] =              l_addTreeChild(root, "Reader Writer Locks");
+	lv2_types[SYS_INTR_TAG_OBJECT] =            l_addTreeChild(root, "Interrupt Tags");
 	lv2_types[SYS_INTR_SERVICE_HANDLE_OBJECT] = l_addTreeChild(root, "Interrupt Service Handles");
-	lv2_types[SYS_EVENT_QUEUE_OBJECT] =					l_addTreeChild(root, "Event Queues");
-	lv2_types[SYS_EVENT_PORT_OBJECT] =					l_addTreeChild(root, "Event Ports");
-	lv2_types[SYS_TRACE_OBJECT] =								l_addTreeChild(root, "Traces");
-	lv2_types[SYS_SPUIMAGE_OBJECT] =						l_addTreeChild(root, "SPU Images");
-	lv2_types[SYS_PRX_OBJECT] =									l_addTreeChild(root, "Modules");
-	lv2_types[SYS_SPUPORT_OBJECT] =							l_addTreeChild(root, "SPU Ports");
-	lv2_types[SYS_LWMUTEX_OBJECT] =							l_addTreeChild(root, "Light Weight Mutexes");
-	lv2_types[SYS_TIMER_OBJECT] =								l_addTreeChild(root, "Timers");
-	lv2_types[SYS_SEMAPHORE_OBJECT] =						l_addTreeChild(root, "Semaphores");
-	lv2_types[SYS_LWCOND_OBJECT] =							l_addTreeChild(root, "Light Weight Condition Variables");
-	lv2_types[SYS_EVENT_FLAG_OBJECT] =					l_addTreeChild(root, "Event Flags");
+	lv2_types[SYS_EVENT_QUEUE_OBJECT] =         l_addTreeChild(root, "Event Queues");
+	lv2_types[SYS_EVENT_PORT_OBJECT] =          l_addTreeChild(root, "Event Ports");
+	lv2_types[SYS_TRACE_OBJECT] =               l_addTreeChild(root, "Traces");
+	lv2_types[SYS_SPUIMAGE_OBJECT] =            l_addTreeChild(root, "SPU Images");
+	lv2_types[SYS_PRX_OBJECT] =                 l_addTreeChild(root, "PRX Modules");
+	lv2_types[SYS_SPUPORT_OBJECT] =             l_addTreeChild(root, "SPU Ports");
+	lv2_types[SYS_OVERLAY_OBJECT] =             l_addTreeChild(root, "Overlay Modules");
+	lv2_types[SYS_LWMUTEX_OBJECT] =             l_addTreeChild(root, "Light Weight Mutexes");
+	lv2_types[SYS_TIMER_OBJECT] =               l_addTreeChild(root, "Timers");
+	lv2_types[SYS_SEMAPHORE_OBJECT] =           l_addTreeChild(root, "Semaphores");
+	lv2_types[SYS_LWCOND_OBJECT] =              l_addTreeChild(root, "Light Weight Condition Variables");
+	lv2_types[SYS_EVENT_FLAG_OBJECT] =          l_addTreeChild(root, "Event Flags");
 
 	idm::select<lv2_obj>([&](u32 id, lv2_obj& obj)
 	{
@@ -212,6 +213,12 @@ void kernel_explorer::Update()
 			l_addTreeChild(node, qstr(fmt::format("SPU Port: ID = 0x%08x", id)));
 			break;
 		}
+		case SYS_OVERLAY_OBJECT:
+		{
+			auto& ovl = static_cast<lv2_overlay&>(obj);
+			l_addTreeChild(node, qstr(fmt::format("OVL: ID = 0x%08x '%s'", id, ovl.name)));
+			break;
+		}
 		case SYS_LWMUTEX_OBJECT:
 		{
 			auto& lwm = static_cast<lv2_lwmutex&>(obj);
@@ -233,7 +240,7 @@ void kernel_explorer::Update()
 		}
 		case SYS_LWCOND_OBJECT:
 		{
-			auto& lwc = static_cast<lv2_cond&>(obj);
+			auto& lwc = static_cast<lv2_lwcond&>(obj);
 			l_addTreeChild(node, qstr(fmt::format("LWCond: ID = 0x%08x \"%s\", Waiters = %zu", id, +name64(lwc.name), +lwc.waiters)));
 			break;
 		}
@@ -261,18 +268,18 @@ void kernel_explorer::Update()
 
 	lv2_types.emplace_back(l_addTreeChild(root, "PPU Threads"));
 
-	idm::select<ppu_thread>([&](u32 id, ppu_thread& ppu)
+	idm::select<named_thread<ppu_thread>>([&](u32 id, ppu_thread& ppu)
 	{
 		lv2_types.back().count++;
-		l_addTreeChild(lv2_types.back().node, qstr(fmt::format("PPU Thread: ID = 0x%08x '%s'", id, ppu.get_name())));
+		l_addTreeChild(lv2_types.back().node, qstr(fmt::format("PPU Thread: ID = 0x%08x '%s'", id, *ppu.ppu_tname.load())));
 	});
 
 	lv2_types.emplace_back(l_addTreeChild(root, "SPU Threads"));
 
-	idm::select<SPUThread>([&](u32 id, SPUThread& spu)
+	idm::select<named_thread<spu_thread>>([&](u32 /*id*/, spu_thread& spu)
 	{
 		lv2_types.back().count++;
-		l_addTreeChild(lv2_types.back().node, qstr(fmt::format("SPU Thread: ID = 0x%08x '%s'", id, spu.get_name())));
+		l_addTreeChild(lv2_types.back().node, qstr(fmt::format("SPU Thread: ID = 0x%08x '%s'", spu.lv2_id, *spu.spu_tname.load())));
 	});
 
 	lv2_types.emplace_back(l_addTreeChild(root, "SPU Thread Groups"));

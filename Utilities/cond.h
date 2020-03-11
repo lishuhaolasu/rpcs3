@@ -1,7 +1,9 @@
 #pragma once
 
 #include "types.h"
-#include "Atomic.h"
+#include "util/atomic.hpp"
+#include <shared_mutex>
+#include "asm.h"
 
 // Lightweight condition variable
 class cond_variable
@@ -9,11 +11,32 @@ class cond_variable
 	// Internal waiter counter
 	atomic_t<u32> m_value{0};
 
-	friend class notifier;
+	enum : u32
+	{
+		c_waiter_mask = 0x1fff,
+		c_signal_mask = 0xffffffff & ~c_waiter_mask,
+	};
 
 protected:
+	// Increment waiter count
+	u32 add_waiter() noexcept
+	{
+		return m_value.atomic_op([](u32& value) -> u32
+		{
+			if ((value & c_signal_mask) == c_signal_mask || (value & c_waiter_mask) == c_waiter_mask)
+			{
+				// Signal or waiter overflow, return immediately
+				return 0;
+			}
+
+			// Add waiter (c_waiter_mask)
+			value += 1;
+			return value;
+		});
+	}
+
 	// Internal waiting function
-	bool imp_wait(u32 _old, u64 _timeout) noexcept;
+	void imp_wait(u32 _old, u64 _timeout) noexcept;
 
 	// Try to notify up to _count threads
 	void imp_wake(u32 _count) noexcept;
@@ -23,13 +46,33 @@ public:
 
 	// Intrusive wait algorithm for lockable objects
 	template <typename T>
-	explicit_bool_t wait(T& object, u64 usec_timeout = -1)
+	void wait(T& object, u64 usec_timeout = -1) noexcept
 	{
-		const u32 _old = m_value.fetch_add(1); // Increment waiter counter
+		const u32 _old = add_waiter();
+
+		if (!_old)
+		{
+			return;
+		}
+
 		object.unlock();
-		const bool res = imp_wait(_old, usec_timeout);
+		imp_wait(_old, usec_timeout);
 		object.lock();
-		return res;
+	}
+
+	// Unlock all specified objects but don't lock them again
+	template <typename... Locks>
+	void wait_unlock(u64 usec_timeout, Locks&&... locks)
+	{
+		const u32 _old = add_waiter();
+		(..., std::forward<Locks>(locks).unlock());
+
+		if (!_old)
+		{
+			return;
+		}
+
+		imp_wait(_old, usec_timeout);
 	}
 
 	// Wake one thread
@@ -50,70 +93,5 @@ public:
 		}
 	}
 
-	static constexpr u64 max_timeout = u64{UINT32_MAX} / 1000 * 1000000;
-};
-
-// Pair of a fake shared mutex (only limited shared locking) and a condition variable
-class notifier
-{
-	atomic_t<u32> m_counter{0};
-	cond_variable m_cond;
-
-	bool imp_try_lock(u32 count);
-
-	void imp_unlock(u32 count);
-
-	u32 imp_notify(u32 count);
-
-public:
-	constexpr notifier() = default;
-
-	bool try_lock()
-	{
-		return imp_try_lock(max_readers);
-	}
-
-	void unlock()
-	{
-		imp_unlock(max_readers);
-	}
-
-	bool try_lock_shared()
-	{
-		return imp_try_lock(1);
-	}
-
-	void unlock_shared()
-	{
-		imp_unlock(1);
-	}
-
-	explicit_bool_t wait(u64 usec_timeout = -1);
-
-	void notify_all()
-	{
-		if (m_counter)
-		{
-			imp_notify(-1);
-		}
-
-		// Notify after imaginary "exclusive" lock+unlock
-		m_cond.notify_all();
-	}
-
-	void notify_one()
-	{
-		// TODO
-		if (m_counter)
-		{
-			if (imp_notify(1))
-			{
-				return;
-			}
-		}
-
-		m_cond.notify_one();
-	}
-
-	static constexpr u32 max_readers = 0x7f;
+	static constexpr u64 max_timeout = UINT64_MAX / 1000;
 };

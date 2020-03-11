@@ -1,9 +1,4 @@
-#include "stdafx.h"
-#include "Utilities/sysinfo.h"
-#include "Emu/Memory/vm.h"
-#include "Emu/Cell/SPUThread.h"
-#include "Emu/Cell/lv2/sys_sync.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
 #include "MFC.h"
 
 template <>

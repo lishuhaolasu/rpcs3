@@ -1,20 +1,24 @@
-#include "emu_settings.h"
+﻿#include "emu_settings.h"
 
-#include "stdafx.h"
-#include "Emu/System.h"
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+
 #include "Utilities/Config.h"
+#include "Utilities/Thread.h"
+#include "Utilities/StrUtil.h"
 
-#ifdef _MSC_VER
-#include <Windows.h>
-#undef GetHwnd
-#include <d3d12.h>
-#include <wrl/client.h>
-#include <dxgi1_4.h>
-#endif
+#include <QMessageBox>
+#include <QLineEdit>
 
 #if defined(_WIN32) || defined(HAVE_VULKAN)
 #include "Emu/RSX/VK/VKHelpers.h"
 #endif
+
+#include "3rdparty/OpenAL/include/alext.h"
+
+LOG_CHANNEL(cfg_log, "CFG");
 
 extern std::string g_cfg_defaults; //! Default settings grabbed from Utilities/Config.h
 
@@ -96,7 +100,7 @@ namespace cfg_adapter
 	{
 		return get_node(node, loc.cbegin(), loc.cend());
 	}
-};
+}
 
 /** Returns possible options for values for some particular setting.*/
 static QStringList getOptions(cfg_location location)
@@ -113,66 +117,133 @@ static QStringList getOptions(cfg_location location)
 
 emu_settings::Render_Creator::Render_Creator()
 {
-	// check for dx12 adapters
-#ifdef _MSC_VER
-	HMODULE D3D12Module = LoadLibrary(L"d3d12.dll");
+#if defined(WIN32) || defined(HAVE_VULKAN)
+	// Some drivers can get stuck when checking for vulkan-compatible gpus, f.ex. if they're waiting for one to get
+	// plugged in. This whole contraption is for showing an error message in case that happens, so that user has
+	// some idea about why the emulator window isn't showing up.
 
-	if (D3D12Module != NULL)
+	static std::atomic<bool> was_called = false;
+	if (was_called.exchange(true))
+		fmt::throw_exception("Render_Creator cannot be created more than once" HERE);
+
+	static std::mutex mtx;
+	static std::condition_variable cond;
+	static bool thread_running = true;
+	static bool device_found = false;
+
+	static QStringList compatible_gpus;
+
+	std::thread enum_thread = std::thread([&]
 	{
-		Microsoft::WRL::ComPtr<IDXGIAdapter1> pAdapter;
-		Microsoft::WRL::ComPtr<IDXGIFactory1> dxgi_factory;
-		if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory))))
-		{
-			PFN_D3D12_CREATE_DEVICE wrapD3D12CreateDevice = (PFN_D3D12_CREATE_DEVICE)GetProcAddress(D3D12Module, "D3D12CreateDevice");
-			if (wrapD3D12CreateDevice != nullptr)
-			{
-				for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != dxgi_factory->EnumAdapters1(adapterIndex, pAdapter.ReleaseAndGetAddressOf()); ++adapterIndex)
-				{
-					if (SUCCEEDED(wrapD3D12CreateDevice(pAdapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr)))
-					{
-						//A device with D3D12 support found. Init data
-						supportsD3D12 = true;
+		thread_ctrl::set_native_priority(-1);
 
-						DXGI_ADAPTER_DESC desc;
-						if (SUCCEEDED(pAdapter->GetDesc(&desc)))
-							D3D12Adapters.append(QString::fromWCharArray(desc.Description));
-					}
+		vk::context device_enum_context;
+		if (device_enum_context.createInstance("RPCS3", true))
+		{
+			device_enum_context.makeCurrentInstance();
+			std::vector<vk::physical_device> &gpus = device_enum_context.enumerateDevices();
+
+			if (!gpus.empty())
+			{
+				device_found = true;
+
+				for (auto &gpu : gpus)
+				{
+					compatible_gpus.append(qstr(gpu.get_name()));
 				}
 			}
 		}
-	}
-#endif
 
-#if defined(WIN32) || defined(HAVE_VULKAN)
-	// check for vulkan adapters
-	vk::context device_enum_context;
-	u32 instance_handle = device_enum_context.createInstance("RPCS3", true);
+		std::scoped_lock{mtx}, thread_running = false;
+		cond.notify_all();
+	});
 
-	if (instance_handle > 0)
 	{
-		device_enum_context.makeCurrentInstance(instance_handle);
-		std::vector<vk::physical_device>& gpus = device_enum_context.enumerateDevices();
+		std::unique_lock lck(mtx);
+		cond.wait_for(lck, std::chrono::seconds(10), [&]{ return !thread_running; });
+	}
 
-		if (gpus.size() > 0)
-		{
-			//A device with vulkan support found. Init data
-			supportsVulkan = true;
+	if (thread_running)
+	{
+		cfg_log.error("Vulkan device enumeration timed out");
+		auto button = QMessageBox::critical(nullptr, tr("Vulkan Check Timeout"),
+			tr("Querying for Vulkan-compatible devices is taking too long. This is usually caused by malfunctioning "
+			"graphics drivers, reinstalling them could fix the issue.\n\n"
+			"Selecting ignore starts the emulator without Vulkan support."),
+			QMessageBox::Ignore | QMessageBox::Abort, QMessageBox::Abort);
 
-			for (auto& gpu : gpus)
-			{
-				vulkanAdapters.append(qstr(gpu.name()));
-			}
-		}
+		enum_thread.detach();
+		if (button != QMessageBox::Ignore)
+			std::exit(1);
+
+		supportsVulkan = false;
+	}
+	else
+	{
+		supportsVulkan = device_found;
+		vulkanAdapters = std::move(compatible_gpus);
+		enum_thread.join();
 	}
 #endif
 
 	// Graphics Adapter
-	D3D12 = Render_Info(name_D3D12, D3D12Adapters, supportsD3D12, emu_settings::D3D12Adapter);
-	Vulkan = Render_Info(name_Vulkan, vulkanAdapters, supportsVulkan, emu_settings::VulkanAdapter);
+	Vulkan = Render_Info(name_Vulkan, vulkanAdapters, supportsVulkan, emu_settings::VulkanAdapter, true);
 	OpenGL = Render_Info(name_OpenGL);
 	NullRender = Render_Info(name_Null);
 
-	renderers = { &D3D12, &Vulkan, &OpenGL, &NullRender };
+	renderers = { &Vulkan, &OpenGL, &NullRender };
+}
+
+emu_settings::Microphone_Creator::Microphone_Creator()
+{
+	RefreshList();
+}
+
+void emu_settings::Microphone_Creator::RefreshList()
+{
+	microphones_list.clear();
+	microphones_list.append(mic_none);
+
+	if (alcIsExtensionPresent(NULL, "ALC_ENUMERATION_EXT") == AL_TRUE)
+	{
+		const char *devices = alcGetString(NULL, ALC_CAPTURE_DEVICE_SPECIFIER);
+
+		while (*devices != 0)
+		{
+			microphones_list.append(qstr(devices));
+			devices += strlen(devices) + 1;
+		}
+	}
+	else
+	{
+		// Without enumeration we can only use one device
+		microphones_list.append(qstr(alcGetString(NULL, ALC_DEFAULT_DEVICE_SPECIFIER)));
+	}
+}
+
+std::string emu_settings::Microphone_Creator::SetDevice(u32 num, QString& text)
+{
+	if (text == mic_none)
+		sel_list[num-1] = "";
+	else
+		sel_list[num-1] = text.toStdString();
+
+	const std::string final_list = sel_list[0] + "@@@" + sel_list[1] + "@@@" + sel_list[2] + "@@@" + sel_list[3] + "@@@";
+	return final_list;
+}
+
+void emu_settings::Microphone_Creator::ParseDevices(std::string list)
+{
+	for (u32 index = 0; index < 4; index++)
+	{
+		sel_list[index] = "";
+	}
+
+	const auto devices_list = fmt::split(list, { "@@@" });
+	for (u32 index = 0; index < std::min<u32>(4, ::size32(devices_list)); index++)
+	{
+		sel_list[index] = devices_list[index];
+	}
 }
 
 emu_settings::emu_settings() : QObject()
@@ -183,12 +254,12 @@ emu_settings::~emu_settings()
 {
 }
 
-void emu_settings::LoadSettings(const std::string& path)
+void emu_settings::LoadSettings(const std::string& title_id)
 {
-	m_path = path;
+	m_title_id = title_id;
 
 	// Create config path if necessary
-	fs::create_path(fs::get_config_dir() + path);
+	fs::create_path(title_id.empty() ? fs::get_config_dir() : Emulator::GetCustomConfigDir());
 
 	// Load default config
 	m_defaultSettings = YAML::Load(g_cfg_defaults);
@@ -200,11 +271,23 @@ void emu_settings::LoadSettings(const std::string& path)
 	config.close();
 
 	// Add game config
-	if (!path.empty() && fs::is_file(fs::get_config_dir() + path + "/config.yml"))
+	if (!title_id.empty())
 	{
-		config = fs::file(fs::get_config_dir() + path + "/config.yml", fs::read + fs::write);
-		m_currentSettings += YAML::Load(config.to_string());
-		config.close();
+		const std::string config_path_new = Emulator::GetCustomConfigPath(m_title_id);
+		const std::string config_path_old = Emulator::GetCustomConfigPath(m_title_id, true);
+
+		if (fs::is_file(config_path_new))
+		{
+			config = fs::file(config_path_new, fs::read + fs::write);
+			m_currentSettings += YAML::Load(config.to_string());
+			config.close();
+		}
+		else if (fs::is_file(config_path_old))
+		{
+			config = fs::file(config_path_old, fs::read + fs::write);
+			m_currentSettings += YAML::Load(config.to_string());
+			config.close();
+		}
 	}
 }
 
@@ -214,26 +297,54 @@ void emu_settings::SaveSettings()
 	YAML::Emitter out;
 	emitData(out, m_currentSettings);
 
-	if (!m_path.empty())
+	std::string config_name;
+
+	if (m_title_id.empty())
 	{
-		config = fs::file(fs::get_config_dir() + m_path + "/config.yml", fs::read + fs::write + fs::create);
+		config_name = fs::get_config_dir() + "/config.yml";
 	}
 	else
 	{
-		config = fs::file(fs::get_config_dir() + "/config.yml", fs::read + fs::write + fs::create);
+		config_name = Emulator::GetCustomConfigPath(m_title_id);
 	}
+
+	config = fs::file(config_name, fs::read + fs::write + fs::create);
 
 	// Save config
 	config.seek(0);
 	config.trunc(0);
 	config.write(out.c_str(), out.size());
+
+	// Check if the running config/title is the same as the edited config/title.
+	if (config_name == g_cfg.name || m_title_id == Emu.GetTitleID())
+	{
+		// Update current config
+		g_cfg.from_string(config.to_string(), true);
+
+		if (!Emu.IsStopped()) // Don't spam the log while emulation is stopped. The config will be logged on boot anyway.
+		{
+			cfg_log.notice("Updated configuration:\n%s\n", g_cfg.to_string());
+		}
+	}
+
 	config.close();
 }
 
-void emu_settings::EnhanceComboBox(QComboBox* combobox, SettingsType type, bool is_ranged, bool use_max, int max)
+void emu_settings::EnhanceComboBox(QComboBox* combobox, SettingsType type, bool is_ranged, bool use_max, int max, bool sorted)
 {
+	if (!combobox)
+	{
+		cfg_log.fatal("EnhanceComboBox '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
 	if (is_ranged)
 	{
+		if (sorted)
+		{
+			cfg_log.warning("EnhanceCombobox '%s': ignoring sorting request on ranged combo box", GetSettingName(type));
+		}
+
 		QStringList range = GetSettingOptions(type);
 
 		int max_item = use_max ? max : range.last().toInt();
@@ -245,24 +356,35 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, SettingsType type, bool 
 	}
 	else
 	{
-		for (QString setting : GetSettingOptions(type))
+		QStringList settings = GetSettingOptions(type);
+
+		if (sorted)
+		{
+			settings.sort();
+		}
+
+		for (QString setting : settings)
 		{
 			combobox->addItem(tr(setting.toStdString().c_str()), QVariant(setting));
 		}
 	}
 
-	QString selected = qstr(GetSetting(type));
-	int index = combobox->findData(selected);
+	std::string selected = GetSetting(type);
+	int index = combobox->findData(qstr(selected));
+
 	if (index == -1)
 	{
-		LOG_WARNING(GENERAL, "Current setting not found while creating combobox");
+		std::string def = GetSettingDefault(type);
+		cfg_log.fatal("EnhanceComboBox '%s' tried to set an invalid value: %s. Setting to default: %s", GetSettingName(type), selected, def);
+		combobox->setCurrentIndex(combobox->findData(qstr(def)));
+		m_broken_types.insert(type);
 	}
 	else
 	{
 		combobox->setCurrentIndex(index);
 	}
 
-	connect(combobox, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), [=](int index)
+	connect(combobox, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), [=, this](int index)
 	{
 		SetSetting(type, sstr(combobox->itemData(index)));
 	});
@@ -270,53 +392,180 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, SettingsType type, bool 
 
 void emu_settings::EnhanceCheckBox(QCheckBox* checkbox, SettingsType type)
 {
-	std::string currSet = GetSetting(type);
-	if (currSet == "true")
+	if (!checkbox)
+	{
+		cfg_log.fatal("EnhanceCheckBox '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
+	std::string def = GetSettingDefault(type);
+	std::transform(def.begin(), def.end(), def.begin(), ::tolower);
+
+	if (def != "true" && def != "false")
+	{
+		cfg_log.fatal("EnhanceCheckBox '%s' was used with an invalid SettingsType", GetSettingName(type));
+		return;
+	}
+
+	std::string selected = GetSetting(type);
+	std::transform(selected.begin(), selected.end(), selected.begin(), ::tolower);
+
+	if (selected == "true")
 	{
 		checkbox->setChecked(true);
 	}
-	else if (currSet != "false")
+	else if (selected != "false")
 	{
-		LOG_WARNING(GENERAL, "Passed in an invalid setting for creating enhanced checkbox");
+		cfg_log.fatal("EnhanceCheckBox '%s' tried to set an invalid value: %s. Setting to default: %s", GetSettingName(type), selected, def);
+		checkbox->setChecked(def == "true");
+		m_broken_types.insert(type);
 	}
 
-	connect(checkbox, &QCheckBox::stateChanged, [=](int val)
+	connect(checkbox, &QCheckBox::stateChanged, [=, this](int val)
 	{
 		std::string str = val != 0 ? "true" : "false";
 		SetSetting(type, str);
 	});
 }
 
-void emu_settings::EnhanceSlider(QSlider* slider, SettingsType type, bool is_ranged)
+void emu_settings::EnhanceSlider(QSlider* slider, SettingsType type)
 {
+	if (!slider)
+	{
+		cfg_log.fatal("EnhanceSlider '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
+	QStringList range = GetSettingOptions(type);
+	bool ok_def, ok_sel, ok_min, ok_max;
+
+	int def = qstr(GetSettingDefault(type)).toInt(&ok_def);
+	int min = range.first().toInt(&ok_min);
+	int max = range.last().toInt(&ok_max);
+
+	if (!ok_def || !ok_min || !ok_max)
+	{
+		cfg_log.fatal("EnhanceSlider '%s' was used with an invalid SettingsType", GetSettingName(type));
+		return;
+	}
+
 	QString selected = qstr(GetSetting(type));
+	int val = selected.toInt(&ok_sel);
 
-	if (is_ranged)
+	if (!ok_sel || val < min || val > max)
 	{
-		QStringList range = GetSettingOptions(type);
-		int min = range.first().toInt();
-		int max = range.last().toInt();
-		int val = selected.toInt();
-
-		if (val < min || val > max)
-		{
-			LOG_ERROR(GENERAL, "Passed in an invalid setting for creating enhanced slider");
-			val = min;
-		}
-
-		slider->setMinimum(min);
-		slider->setMaximum(max);
-		slider->setValue(val);
-	}
-	else
-	{
-		//TODO ?
-		LOG_ERROR(GENERAL, "TODO: implement unranged enhanced slider");
+		cfg_log.fatal("EnhanceSlider '%s' tried to set an invalid value: %d. Setting to default: %d. Allowed range: [%d, %d]", GetSettingName(type), val, def, min, max);
+		val = def;
+		m_broken_types.insert(type);
 	}
 
-	connect(slider, &QSlider::valueChanged, [=](int value)
+	slider->setRange(min, max);
+	slider->setValue(val);
+
+	connect(slider, &QSlider::valueChanged, [=, this](int value)
 	{
 		SetSetting(type, sstr(value));
+	});
+}
+
+void emu_settings::EnhanceSpinBox(QSpinBox* spinbox, SettingsType type, const QString& prefix, const QString& suffix)
+{
+	if (!spinbox)
+	{
+		cfg_log.fatal("EnhanceSpinBox '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
+	QStringList range = GetSettingOptions(type);
+	bool ok_def, ok_sel, ok_min, ok_max;
+
+	int def = qstr(GetSettingDefault(type)).toInt(&ok_def);
+	int min = range.first().toInt(&ok_min);
+	int max = range.last().toInt(&ok_max);
+
+	if (!ok_def || !ok_min || !ok_max)
+	{
+		cfg_log.fatal("EnhanceSpinBox '%s' was used with an invalid type", GetSettingName(type));
+		return;
+	}
+
+	std::string selected = GetSetting(type);
+	int val = qstr(selected).toInt(&ok_sel);
+
+	if (!ok_sel || val < min || val > max)
+	{
+		cfg_log.fatal("EnhanceSpinBox '%s' tried to set an invalid value: %d. Setting to default: %d. Allowed range: [%d, %d]", GetSettingName(type), selected, def, min, max);
+		val = def;
+		m_broken_types.insert(type);
+	}
+
+	spinbox->setPrefix(prefix);
+	spinbox->setSuffix(suffix);
+	spinbox->setRange(min, max);
+	spinbox->setValue(val);
+
+	connect(spinbox, &QSpinBox::textChanged, [=, this](const QString&/* text*/)
+	{
+		SetSetting(type, sstr(spinbox->cleanText()));
+	});
+}
+
+void emu_settings::EnhanceDoubleSpinBox(QDoubleSpinBox* spinbox, SettingsType type, const QString& prefix, const QString& suffix)
+{
+	if (!spinbox)
+	{
+		cfg_log.fatal("EnhanceDoubleSpinBox '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
+	QStringList range = GetSettingOptions(type);
+	bool ok_def, ok_sel, ok_min, ok_max;
+
+	double def = qstr(GetSettingDefault(type)).toDouble(&ok_def);
+	double min = range.first().toDouble(&ok_min);
+	double max = range.last().toDouble(&ok_max);
+
+	if (!ok_def || !ok_min || !ok_max)
+	{
+		cfg_log.fatal("EnhanceDoubleSpinBox '%s' was used with an invalid type", GetSettingName(type));
+		return;
+	}
+
+	std::string selected = GetSetting(type);
+	double val = qstr(selected).toDouble(&ok_sel);
+
+	if (!ok_sel || val < min || val > max)
+	{
+		cfg_log.fatal("EnhanceDoubleSpinBox '%s' tried to set an invalid value: %f. Setting to default: %f. Allowed range: [%f, %f]", GetSettingName(type), val, def, min, max);
+		val = def;
+		m_broken_types.insert(type);
+	}
+
+	spinbox->setPrefix(prefix);
+	spinbox->setSuffix(suffix);
+	spinbox->setRange(min, max);
+	spinbox->setValue(val);
+
+	connect(spinbox, &QDoubleSpinBox::textChanged, [=, this](const QString&/* text*/)
+	{
+		SetSetting(type, sstr(spinbox->cleanText()));
+	});
+}
+
+void emu_settings::EnhanceEdit(QLineEdit* edit, SettingsType type)
+{
+	if (!edit)
+	{
+		cfg_log.fatal("EnhanceEdit '%s' was used with an invalid object", GetSettingName(type));
+		return;
+	}
+
+	const std::string set_text = GetSetting(type);
+	edit->setText(qstr(set_text));
+
+	connect(edit, &QLineEdit::textChanged, [=, this](const QString &text)
+	{
+		SetSetting(type, sstr(text));
 	});
 }
 
@@ -354,4 +603,30 @@ std::string emu_settings::GetSetting(SettingsType type) const
 void emu_settings::SetSetting(SettingsType type, const std::string& val)
 {
 	cfg_adapter::get_node(m_currentSettings, SettingsLoc[type]) = val;
+}
+
+void emu_settings::OpenCorrectionDialog(QWidget* parent)
+{
+	if (!m_broken_types.empty() && QMessageBox::question(parent, tr("Fix invalid settings?"),
+		tr(
+			"Your config file contained one or more unrecognized values for settings.\n"
+			"Their default value will be used until they are corrected.\n"
+			"Consider that a correction might render them invalid for other versions of RPCS3.\n"
+			"\n"
+			"Do you wish to let the program correct them for you?\n"
+			"This change will only be final when you save the config."
+		),
+		QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes)
+	{
+		for (const auto& type : m_broken_types)
+		{
+			std::string def = GetSettingDefault(type);
+			std::string old = GetSetting(type);
+			SetSetting(type, def);
+			cfg_log.success("The config entry '%s' was corrected from '%s' to '%s'", GetSettingName(type), old, def);
+		}
+
+		m_broken_types.clear();
+		cfg_log.success("You need to save the settings in order to make these changes permanent!");
+	}
 }

@@ -1,8 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "Utilities/types.h"
 #include "Utilities/StrFmt.h"
-#include "Utilities/Log.h"
+#include "util/logs.hpp"
+#include "util/atomic.hpp"
+#include "util/shared_cptr.hpp"
 
 #include <utility>
 #include <string>
@@ -42,18 +44,24 @@ namespace cfg
 		const type m_type;
 
 	protected:
+		bool m_dynamic = true;
+
 		// Ownerless entry constructor
 		_base(type _type);
 
 		// Owned entry constructor
-		_base(type _type, class node* owner, const std::string& name);
+		_base(type _type, class node* owner, const std::string& name, bool dynamic = true);
 
 	public:
-		// Disallow copy/move constructors and assignments
 		_base(const _base&) = delete;
+
+		_base& operator=(const _base&) = delete;
 
 		// Get type
 		type get_type() const { return m_type; }
+
+		// Get dynamic property for reloading configs during games
+		bool get_is_dynamic() const { return m_dynamic; };
 
 		// Reset defaults
 		virtual void from_default() = 0;
@@ -65,7 +73,7 @@ namespace cfg
 		}
 
 		// Try to convert from string (optional)
-		virtual bool from_string(const std::string&);
+		virtual bool from_string(const std::string&, bool /*dynamic*/ = false);
 
 		// Get string list (optional)
 		virtual std::vector<std::string> to_list() const
@@ -92,8 +100,8 @@ namespace cfg
 		}
 
 		// Registered node constructor
-		node(node* owner, const std::string& name)
-			: _base(type::node, owner, name)
+		node(node* owner, const std::string& name, bool dynamic = true)
+			: _base(type::node, owner, name, dynamic)
 		{
 		}
 
@@ -107,7 +115,7 @@ namespace cfg
 		std::string to_string() const override;
 
 		// Deserialize node
-		bool from_string(const std::string& value) override;
+		bool from_string(const std::string& value, bool dynamic = false) override;
 
 		// Set default values
 		void from_default() override;
@@ -115,13 +123,13 @@ namespace cfg
 
 	class _bool final : public _base
 	{
-		bool m_value;
+		atomic_t<bool> m_value;
 
 	public:
 		bool def;
 
-		_bool(node* owner, const std::string& name, bool def = false)
-			: _base(type::_bool, owner, name)
+		_bool(node* owner, const std::string& name, bool def = false, bool dynamic = false)
+			: _base(type::_bool, owner, name, dynamic)
 			, m_value(def)
 			, def(def)
 		{
@@ -144,7 +152,7 @@ namespace cfg
 			return m_value ? "true" : "false";
 		}
 
-		bool from_string(const std::string& value) override
+		bool from_string(const std::string& value, bool /*dynamic*/ = false) override
 		{
 			if (value == "false")
 				m_value = false;
@@ -166,13 +174,13 @@ namespace cfg
 	template <typename T>
 	class _enum final : public _base
 	{
-		T m_value;
+		atomic_t<T> m_value;
 
 	public:
 		const T def;
 
-		_enum(node* owner, const std::string& name, T value = {})
-			: _base(type::_enum, owner, name)
+		_enum(node* owner, const std::string& name, T value = {}, bool dynamic = false)
+			: _base(type::_enum, owner, name, dynamic)
 			, m_value(value)
 			, def(value)
 		{
@@ -196,11 +204,11 @@ namespace cfg
 		std::string to_string() const override
 		{
 			std::string result;
-			fmt_class_string<T>::format(result, fmt_unveil<T>::get(m_value));
+			fmt_class_string<T>::format(result, fmt_unveil<T>::get(m_value.load()));
 			return result; // TODO: ???
 		}
 
-		bool from_string(const std::string& value) override
+		bool from_string(const std::string& value, bool /*dynamic*/ = false) override
 		{
 			u64 result;
 
@@ -229,13 +237,17 @@ namespace cfg
 		// Prefer 32 bit type if possible
 		using int_type = std::conditional_t<Min >= INT32_MIN && Max <= INT32_MAX, s32, s64>;
 
-		int_type m_value;
+		atomic_t<int_type> m_value;
 
 	public:
 		int_type def;
 
-		_int(node* owner, const std::string& name, int_type def = std::min<int_type>(Max, std::max<int_type>(Min, 0)))
-			: _base(type::_int, owner, name)
+		// Expose range
+		static const s64 max = Max;
+		static const s64 min = Min;
+
+		_int(node* owner, const std::string& name, int_type def = std::min<int_type>(Max, std::max<int_type>(Min, 0)), bool dynamic = false)
+			: _base(type::_int, owner, name, dynamic)
 			, m_value(def)
 			, def(def)
 		{
@@ -261,7 +273,7 @@ namespace cfg
 			return std::to_string(m_value);
 		}
 
-		bool from_string(const std::string& value) override
+		bool from_string(const std::string& value, bool /*dynamic*/ = false) override
 		{
 			s64 result;
 			if (try_to_int64(&result, value, Min, Max))
@@ -293,43 +305,56 @@ namespace cfg
 	// Simple string entry with mutex
 	class string final : public _base
 	{
-		std::string m_value;
+		const std::string m_name;
+
+		stx::atomic_cptr<std::string> m_value;
 
 	public:
 		std::string def;
 
-		string(node* owner, const std::string& name, const std::string& def = {})
-			: _base(type::string, owner, name)
-			, m_value(def)
-			, def(def)
+		string(node* owner, std::string name, std::string def = {}, bool dynamic = false)
+			: _base(type::string, owner, name, dynamic)
+			, m_name(std::move(name))
+			, m_value(m_value.make(def))
+			, def(std::move(def))
 		{
 		}
 
 		operator std::string() const
 		{
-			return m_value;
+			return *m_value.load().get();
 		}
 
-		const std::string& get() const
+		std::pair<const std::string&, stx::shared_cptr<std::string>> get() const
 		{
-			return m_value;
+			auto v = m_value.load();
+
+			if (auto s = v.get())
+			{
+				return {*s, std::move(v)};
+			}
+			else
+			{
+				static const std::string _empty;
+				return {_empty, {}};
+			}
 		}
 
-		std::size_t size() const
+		const std::string& get_name() const
 		{
-			return m_value.size();
+			return m_name;
 		}
 
 		void from_default() override;
 
 		std::string to_string() const override
 		{
-			return m_value;
+			return *m_value.load().get();
 		}
 
-		bool from_string(const std::string& value) override
+		bool from_string(const std::string& value, bool /*dynamic*/ = false) override
 		{
-			m_value = value;
+			m_value = m_value.make(value);
 			return true;
 		}
 	};
@@ -341,12 +366,12 @@ namespace cfg
 
 	public:
 		// Default value is empty list in current implementation
-		set_entry(node* owner, const std::string& name)
-			: _base(type::set, owner, name)
+		set_entry(node* owner, const std::string& name, bool dynamic = false)
+			: _base(type::set, owner, name, dynamic)
 		{
 		}
 
-		std::set<std::string> get_set() const
+		const std::set<std::string>& get_set() const
 		{
 			return m_set;
 		}
@@ -381,7 +406,7 @@ namespace cfg
 		{
 		}
 
-		std::map<std::string, logs::level> get_map() const
+		const std::map<std::string, logs::level>& get_map() const
 		{
 			return m_map;
 		}

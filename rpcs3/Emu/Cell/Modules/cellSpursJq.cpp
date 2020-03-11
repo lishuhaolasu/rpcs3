@@ -1,5 +1,4 @@
-#include "stdafx.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
 #include "Emu/Cell/PPUModule.h"
 
 #include "Emu/Cell/lv2/sys_lwmutex.h"
@@ -8,7 +7,7 @@
 #include "cellSpurs.h"
 #include "cellSpursJq.h"
 
-logs::channel cellSpursJq("cellSpursJq");
+LOG_CHANNEL(cellSpursJq);
 
 s32 cellSpursJobQueueAttributeInitialize()
 {

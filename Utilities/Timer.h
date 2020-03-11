@@ -1,5 +1,7 @@
 #pragma once
 
+#include "types.h"
+
 #include <chrono>
 
 class Timer
@@ -48,5 +50,12 @@ public:
 		std::chrono::steady_clock::time_point now = m_stopped ? m_end : std::chrono::steady_clock::now();
 
 		return std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_start).count();
+	}
+
+	u64 GetMsSince(std::chrono::steady_clock::time_point timestamp)
+	{
+		std::chrono::steady_clock::time_point now = m_stopped ? m_end : std::chrono::steady_clock::now();
+
+		return std::chrono::duration_cast<std::chrono::milliseconds>(now - timestamp).count();
 	}
 };

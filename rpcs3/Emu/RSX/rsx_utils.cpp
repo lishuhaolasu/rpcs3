@@ -1,19 +1,33 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "rsx_utils.h"
 #include "rsx_methods.h"
-#include "RSXThread.h"
 #include "Emu/RSX/GCM.h"
 #include "Common/BufferUtils.h"
 #include "Overlays/overlays.h"
 #include "Utilities/sysinfo.h"
 
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#endif
 extern "C"
 {
 #include "libswscale/swscale.h"
 }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
 
 namespace rsx
 {
+	atomic_t<u64> g_rsx_shared_tag{ 0 };
+
 	void convert_scale_image(u8 *dst, AVPixelFormat dst_format, int dst_width, int dst_height, int dst_pitch,
 		const u8 *src, AVPixelFormat src_format, int src_width, int src_height, int src_pitch, int src_slice_h, bool bilinear)
 	{
@@ -23,33 +37,44 @@ namespace rsx
 		sws_scale(sws.get(), &src, &src_pitch, 0, src_slice_h, &dst, &dst_pitch);
 	}
 
-	void convert_scale_image(std::unique_ptr<u8[]>& dst, AVPixelFormat dst_format, int dst_width, int dst_height, int dst_pitch,
-		const u8 *src, AVPixelFormat src_format, int src_width, int src_height, int src_pitch, int src_slice_h, bool bilinear)
-	{
-		dst.reset(new u8[dst_pitch * dst_height]);
-		convert_scale_image(dst.get(), dst_format, dst_width, dst_height, dst_pitch,
-			src, src_format, src_width, src_height, src_pitch, src_slice_h, bilinear);
-	}
-
 	void clip_image(u8 *dst, const u8 *src, int clip_x, int clip_y, int clip_w, int clip_h, int bpp, int src_pitch, int dst_pitch)
 	{
-		u8 *pixels_src = (u8*)src + clip_y * src_pitch + clip_x * bpp;
+		const u8* pixels_src = src + clip_y * src_pitch + clip_x * bpp;
 		u8 *pixels_dst = dst;
 		const u32 row_length = clip_w * bpp;
 
 		for (int y = 0; y < clip_h; ++y)
 		{
-			std::memmove(pixels_dst, pixels_src, row_length);
+			std::memcpy(pixels_dst, pixels_src, row_length);
 			pixels_src += src_pitch;
 			pixels_dst += dst_pitch;
 		}
 	}
 
-	void clip_image(std::unique_ptr<u8[]>& dst, const u8 *src,
-		int clip_x, int clip_y, int clip_w, int clip_h, int bpp, int src_pitch, int dst_pitch)
+	void clip_image_may_overlap(u8 *dst, const u8 *src, int clip_x, int clip_y, int clip_w, int clip_h, int bpp, int src_pitch, int dst_pitch, u8 *buffer)
 	{
-		dst.reset(new u8[clip_h * dst_pitch]);
-		clip_image(dst.get(), src, clip_x, clip_y, clip_w, clip_h, bpp, src_pitch, dst_pitch);
+		src += clip_y * src_pitch + clip_x * bpp;
+
+		const u32 buffer_pitch = bpp * clip_w;
+		u8* buf = buffer;
+
+		// Read the whole buffer from source
+		for (int y = 0; y < clip_h; ++y)
+		{
+			std::memcpy(buf, src, buffer_pitch);
+			src += src_pitch;
+			buf += buffer_pitch;
+		}
+
+		buf = buffer;
+
+		// Write to destination
+		for (int y = 0; y < clip_h; ++y)
+		{
+			std::memcpy(dst, buf, buffer_pitch);
+			dst += dst_pitch;
+			buf += buffer_pitch;
+		}
 	}
 
 	//Convert decoded integer values for CONSTANT_BLEND_FACTOR into f32 array in 0-1 range
@@ -74,75 +99,6 @@ namespace rsx
 
 			return { blend_color_r / 255.f, blend_color_g / 255.f, blend_color_b / 255.f, blend_color_a / 255.f };
 		}
-	}
-
-	weak_ptr get_super_ptr(u32 addr, u32 len)
-	{
-		verify(HERE), g_current_renderer;
-
-		if (!g_current_renderer->super_memory_map.first)
-		{
-			auto block = vm::get(vm::any, 0xC0000000);
-			if (block)
-			{
-				g_current_renderer->super_memory_map.first = block->used();
-				g_current_renderer->super_memory_map.second = vm::get_super_ptr<u8>(0xC0000000, g_current_renderer->super_memory_map.first - 1);
-
-				if (!g_current_renderer->super_memory_map.second)
-				{
-					//Disjoint allocation?
-					LOG_ERROR(RSX, "Could not initialize contiguous RSX super-memory");
-				}
-			}
-			else
-			{
-				fmt::throw_exception("RSX memory not mapped!");
-			}
-		}
-
-		if (g_current_renderer->super_memory_map.second)
-		{
-			if (addr >= 0xC0000000 && (addr + len) <= (0xC0000000 + g_current_renderer->super_memory_map.first))
-			{
-				//RSX local
-				return { g_current_renderer->super_memory_map.second.get() + (addr - 0xC0000000) };
-			}
-		}
-
-		if (auto result = vm::get_super_ptr<u8>(addr, len - 1))
-		{
-			return { result };
-		}
-
-		//Probably allocated as split blocks. Try to grab separate chunks
-		std::vector<weak_ptr::memory_block_t> blocks;
-		const u32 limit = addr + len;
-		u32 next = addr;
-		u32 remaining = len;
-
-		while (true)
-		{
-			auto region = vm::get(vm::any, next)->get(next, 1);
-			if (!region.second)
-			{
-				break;
-			}
-
-			const u32 block_offset = next - region.first;
-			const u32 block_length = std::min(remaining, region.second->size() - block_offset);
-			std::shared_ptr<u8> _ptr = { region.second, region.second->get(block_offset, block_length) };
-			blocks.push_back({_ptr, block_length});
-
-			remaining -= block_length;
-			next = region.first + region.second->size();
-			if (next >= limit)
-			{
-				return { blocks };
-			}
-		}
-
-		LOG_ERROR(RSX, "Could not get super_ptr for memory block 0x%x+0x%x", addr, len);
-		return {};
 	}
 
 	/* Fast image scaling routines
@@ -187,13 +143,13 @@ namespace rsx
 		switch (element_size)
 		{
 		case 1:
-			scale_image_fallback_impl<u8, u8>((u8*)dst, (const u8*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u8, u8>(static_cast<u8*>(dst), static_cast<const u8*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		case 2:
-			scale_image_fallback_impl<u16, u16>((u16*)dst, (const u16*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u16, u16>(static_cast<u16*>(dst), static_cast<const u16*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		case 4:
-			scale_image_fallback_impl<u32, u32>((u32*)dst, (const u32*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u32, u32>(static_cast<u32*>(dst), static_cast<const u32*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		default:
 			fmt::throw_exception("unsupported element size %d" HERE, element_size);
@@ -205,13 +161,13 @@ namespace rsx
 		switch (element_size)
 		{
 		case 1:
-			scale_image_fallback_impl<u8, u8>((u8*)dst, (const u8*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u8, u8>(static_cast<u8*>(dst), static_cast<const u8*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		case 2:
-			scale_image_fallback_impl<u16, be_t<u16>>((u16*)dst, (const be_t<u16>*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u16, be_t<u16>>(static_cast<u16*>(dst), static_cast<const be_t<u16>*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		case 4:
-			scale_image_fallback_impl<u32, be_t<u32>>((u32*)dst, (const be_t<u32>*)src, src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
+			scale_image_fallback_impl<u32, be_t<u32>>(static_cast<u32*>(dst), static_cast<const be_t<u32>*>(src), src_width, src_height, dst_pitch, src_pitch, element_size, samples_u, samples_v);
 			break;
 		default:
 			fmt::throw_exception("unsupported element size %d" HERE, element_size);
@@ -248,16 +204,16 @@ namespace rsx
 		switch (element_size)
 		{
 		case 1:
-			scale_image_impl<u8, u8, N>((u8*)dst, (const u8*)src, src_width, src_height, padding);
+			scale_image_impl<u8, u8, N>(static_cast<u8*>(dst), static_cast<const u8*>(src), src_width, src_height, padding);
 			break;
 		case 2:
-			scale_image_impl<u16, u16, N>((u16*)dst, (const u16*)src, src_width, src_height, padding);
+			scale_image_impl<u16, u16, N>(static_cast<u16*>(dst), static_cast<const u16*>(src), src_width, src_height, padding);
 			break;
 		case 4:
-			scale_image_impl<u32, u32, N>((u32*)dst, (const u32*)src, src_width, src_height, padding);
+			scale_image_impl<u32, u32, N>(static_cast<u32*>(dst), static_cast<const u32*>(src), src_width, src_height, padding);
 			break;
 		case 8:
-			scale_image_impl<u64, u64, N>((u64*)dst, (const u64*)src, src_width, src_height, padding);
+			scale_image_impl<u64, u64, N>(static_cast<u64*>(dst), static_cast<const u64*>(src), src_width, src_height, padding);
 			break;
 		default:
 			fmt::throw_exception("unsupported pixel size %d" HERE, element_size);
@@ -270,16 +226,16 @@ namespace rsx
 		switch (element_size)
 		{
 		case 1:
-			scale_image_impl<u8, u8, N>((u8*)dst, (const u8*)src, src_width, src_height, padding);
+			scale_image_impl<u8, u8, N>(static_cast<u8*>(dst), static_cast<const u8*>(src), src_width, src_height, padding);
 			break;
 		case 2:
-			scale_image_impl<u16, be_t<u16>, N>((u16*)dst, (const be_t<u16>*)src, src_width, src_height, padding);
+			scale_image_impl<u16, be_t<u16>, N>(static_cast<u16*>(dst), static_cast<const be_t<u16>*>(src), src_width, src_height, padding);
 			break;
 		case 4:
-			scale_image_impl<u32, be_t<u32>, N>((u32*)dst, (const be_t<u32>*)src, src_width, src_height, padding);
+			scale_image_impl<u32, be_t<u32>, N>(static_cast<u32*>(dst), static_cast<const be_t<u32>*>(src), src_width, src_height, padding);
 			break;
 		case 8:
-			scale_image_impl<u64, be_t<u64>, N>((u64*)dst, (const be_t<u64>*)src, src_width, src_height, padding);
+			scale_image_impl<u64, be_t<u64>, N>(static_cast<u64*>(dst), static_cast<const be_t<u64>*>(src), src_width, src_height, padding);
 			break;
 		default:
 			fmt::throw_exception("unsupported pixel size %d" HERE, element_size);
@@ -370,13 +326,13 @@ namespace rsx
 
 		const auto num_iterations = (num_pixels >> 2);
 
-		__m128i* dst_ptr = (__m128i*)dst;
-		__m128i* src_ptr = (__m128i*)src;
+		__m128i* dst_ptr = static_cast<__m128i*>(dst);
+		__m128i* src_ptr = static_cast<__m128i*>(src);
 
 		const __m128 scale_vector = _mm_set1_ps(16777214.f);
 
 #if defined (_MSC_VER) || defined (__SSSE3__)
-		if (LIKELY(utils::has_ssse3()))
+		if (utils::has_ssse3()) [[likely]]
 		{
 			const __m128i swap_mask = _mm_set_epi8
 			(
@@ -389,7 +345,7 @@ namespace rsx
 			for (u32 n = 0; n < num_iterations; ++n)
 			{
 				const __m128i src_vector = _mm_loadu_si128(src_ptr);
-				const __m128i result = _mm_cvtps_epi32(_mm_mul_ps((__m128&)src_vector, scale_vector));
+				const __m128i result = _mm_cvtps_epi32(_mm_mul_ps(_mm_castsi128_ps(src_vector), scale_vector));
 				const __m128i shuffled_vector = _mm_shuffle_epi8(result, swap_mask);
 				_mm_stream_si128(dst_ptr, shuffled_vector);
 				++dst_ptr;
@@ -407,7 +363,7 @@ namespace rsx
 		for (u32 n = 0; n < num_iterations; ++n)
 		{
 			const __m128i src_vector = _mm_loadu_si128(src_ptr);
-			const __m128i result = _mm_cvtps_epi32(_mm_mul_ps((__m128&)src_vector, scale_vector));
+			const __m128i result = _mm_cvtps_epi32(_mm_mul_ps(_mm_castsi128_ps(src_vector), scale_vector));
 
 			const __m128i v1 = _mm_and_si128(result, mask1);
 			const __m128i v2 = _mm_and_si128(_mm_slli_epi32(result, 16), mask2);
@@ -427,11 +383,11 @@ namespace rsx
 
 		const auto num_iterations = (num_pixels >> 2);
 
-		__m128i* dst_ptr = (__m128i*)dst;
-		__m128i* src_ptr = (__m128i*)src;
+		__m128i* dst_ptr = static_cast<__m128i*>(dst);
+		__m128i* src_ptr = static_cast<__m128i*>(src);
 
 #if defined (_MSC_VER) || defined (__SSSE3__)
-		if (LIKELY(utils::has_ssse3()))
+		if (utils::has_ssse3()) [[likely]]
 		{
 			const __m128i swap_mask = _mm_set_epi8
 			(
@@ -479,8 +435,8 @@ namespace rsx
 
 		const auto num_iterations = (num_pixels >> 2);
 
-		__m128i* dst_ptr = (__m128i*)dst;
-		__m128i* src_ptr = (__m128i*)src;
+		__m128i* dst_ptr = static_cast<__m128i*>(dst);
+		__m128i* src_ptr = static_cast<__m128i*>(src);
 
 		const __m128 scale_vector = _mm_set1_ps(1.f / 16777214.f);
 		const __m128i mask = _mm_set1_epi32(0x00FFFFFF);
@@ -488,9 +444,13 @@ namespace rsx
 		{
 			const __m128 src_vector = _mm_cvtepi32_ps(_mm_and_si128(mask, _mm_loadu_si128(src_ptr)));
 			const __m128 normalized_vector = _mm_mul_ps(src_vector, scale_vector);
-			_mm_stream_si128(dst_ptr, (__m128i&)normalized_vector);
+			_mm_stream_si128(dst_ptr, _mm_castps_si128(normalized_vector));
 			++dst_ptr;
 			++src_ptr;
 		}
 	}
+
+#ifdef TEXTURE_CACHE_DEBUG
+	tex_cache_checker_t tex_cache_checker = {};
+#endif
 }

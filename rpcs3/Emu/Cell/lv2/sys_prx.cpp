@@ -1,22 +1,25 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "sys_prx.h"
+
+#include "Emu/VFS.h"
 #include "Emu/IdManager.h"
 #include "Crypto/unself.h"
 #include "Loader/ELF.h"
 
+#include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/ErrorCodes.h"
 #include "Crypto/unedat.h"
+#include "Utilities/StrUtil.h"
+#include "Utilities/span.h"
 #include "sys_fs.h"
-#include "sys_prx.h"
-
-
+#include "sys_process.h"
+#include "sys_memory.h"
 
 extern std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object&, const std::string&);
 extern void ppu_unload_prx(const lv2_prx& prx);
 extern void ppu_initialize(const ppu_module&);
 
-logs::channel sys_prx("sys_prx");
+LOG_CHANNEL(sys_prx);
 
 static const std::unordered_map<std::string, int> s_prx_ignore
 {
@@ -83,6 +86,21 @@ static const std::unordered_map<std::string, int> s_prx_ignore
 
 static error_code prx_load_module(const std::string& vpath, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt, fs::file src = {})
 {
+	if (flags != 0)
+	{
+		if (flags & SYS_PRX_LOAD_MODULE_FLAGS_INVALIDMASK)
+		{
+			return CELL_EINVAL;
+		}
+
+		if (flags & SYS_PRX_LOAD_MODULE_FLAGS_FIXEDADDR && !g_ps3_process_info.ppc_seg)
+		{
+			return CELL_ENOSYS;
+		}
+
+		fmt::throw_exception("sys_prx: Unimplemented fixed address allocations" HERE);
+	}
+
 	std::string name = vpath.substr(vpath.find_last_of('/') + 1);
 	std::string path = vfs::get(vpath);
 
@@ -101,9 +119,21 @@ static error_code prx_load_module(const std::string& vpath, u64 flags, vm::ptr<s
 		return CELL_PRX_ERROR_LIBRARY_FOUND;
 	}
 
-	bool ignore = s_prx_ignore.count(vpath) != 0;
+	bool ignore = false;
 
-	if (ignore && g_cfg.core.lib_loading == lib_loading_type::both)
+	if (g_cfg.core.lib_loading == lib_loading_type::liblv2list)
+	{
+		if (vpath.starts_with("/dev_flash/sys/external/") && vpath != "/dev_flash/sys/external/libsysmodule.sprx"sv)
+		{
+			ignore = g_cfg.core.load_libraries.get_set().count(name) == 0;
+		}
+	}
+	else
+	{
+		ignore = s_prx_ignore.count(vpath) != 0;
+	}
+
+	if (ignore && (g_cfg.core.lib_loading == lib_loading_type::hybrid || g_cfg.core.lib_loading == lib_loading_type::liblv2both))
 	{
 		// Ignore ignore list if the library is selected in 'both' mode
 		if (g_cfg.core.load_libraries.get_set().count(name) != 0)
@@ -126,10 +156,17 @@ static error_code prx_load_module(const std::string& vpath, u64 flags, vm::ptr<s
 
 	if (!src)
 	{
-		src.open(path);
+		auto [fs_error, ppath, lv2_file] = lv2_file::open(vpath, 0, 0);
+
+		if (fs_error)
+		{
+			return {fs_error, vpath};
+		}
+
+		src = std::move(lv2_file);
 	}
 
-	const ppu_prx_object obj = decrypt_self(std::move(src), fxm::get_always<LoadedNpdrmKeys_t>()->devKlic.data());
+	const ppu_prx_object obj = decrypt_self(std::move(src), g_fxo->get<loaded_npdrm_keys>()->devKlic.data());
 
 	if (obj != elf_error::ok)
 	{
@@ -177,16 +214,39 @@ error_code _sys_prx_load_module_on_memcontainer_by_fd(s32 fd, u64 offset, u32 me
 	return _sys_prx_load_module_by_fd(fd, offset, flags, pOpt);
 }
 
-error_code _sys_prx_load_module_list(s32 count, vm::cpptr<char, u32, u64> path_list, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt, vm::ptr<u32> id_list)
+static error_code prx_load_module_list(s32 count, vm::cpptr<char, u32, u64> path_list, u32 mem_ct, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt, vm::ptr<u32> id_list)
 {
-	sys_prx.warning("_sys_prx_load_module_list(count=%d, path_list=**0x%x, flags=0x%x, pOpt=*0x%x, id_list=*0x%x)", count, path_list, flags, pOpt, id_list);
+	if (flags != 0)
+	{
+		if (flags & SYS_PRX_LOAD_MODULE_FLAGS_INVALIDMASK)
+		{
+			return CELL_EINVAL;
+		}
+
+		if (flags & SYS_PRX_LOAD_MODULE_FLAGS_FIXEDADDR && !g_ps3_process_info.ppc_seg)
+		{
+			return CELL_ENOSYS;
+		}
+
+		fmt::throw_exception("sys_prx: Unimplemented fixed address allocations" HERE);
+	}
 
 	for (s32 i = 0; i < count; ++i)
 	{
-		error_code result = prx_load_module(path_list[i].get_ptr(), flags, pOpt);
+		const auto result = prx_load_module(path_list[i].get_ptr(), flags, pOpt);
 
 		if (result < 0)
+		{
+			while (--i >= 0)
+			{
+				// Unload already loaded modules
+				_sys_prx_unload_module(id_list[i], 0, vm::null);
+			}
+
+			// Fill with -1
+			std::memset(id_list.get_ptr(), -1, count * sizeof(id_list[0]));
 			return result;
+		}
 
 		id_list[i] = result;
 	}
@@ -194,21 +254,17 @@ error_code _sys_prx_load_module_list(s32 count, vm::cpptr<char, u32, u64> path_l
 	return CELL_OK;
 }
 
+error_code _sys_prx_load_module_list(s32 count, vm::cpptr<char, u32, u64> path_list, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt, vm::ptr<u32> id_list)
+{
+	sys_prx.warning("_sys_prx_load_module_list(count=%d, path_list=**0x%x, flags=0x%x, pOpt=*0x%x, id_list=*0x%x)", count, path_list, flags, pOpt, id_list);
+
+	return prx_load_module_list(count, path_list, SYS_MEMORY_CONTAINER_ID_INVALID, flags, pOpt, id_list);
+}
 error_code _sys_prx_load_module_list_on_memcontainer(s32 count, vm::cpptr<char, u32, u64> path_list, u32 mem_ct, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt, vm::ptr<u32> id_list)
 {
 	sys_prx.warning("_sys_prx_load_module_list_on_memcontainer(count=%d, path_list=**0x%x, mem_ct=0x%x, flags=0x%x, pOpt=*0x%x, id_list=*0x%x)", count, path_list, mem_ct, flags, pOpt, id_list);
 
-	for (s32 i = 0; i < count; ++i)
-	{
-		error_code result = prx_load_module(path_list[i].get_ptr(), flags, pOpt);
-
-		if (result < 0)
-			return result;
-
-		id_list[i] = result;
-	}
-
-	return CELL_OK;
+	return prx_load_module_list(count, path_list, mem_ct, flags, pOpt, id_list);
 }
 
 error_code _sys_prx_load_module_on_memcontainer(vm::cptr<char> path, u32 mem_ct, u64 flags, vm::ptr<sys_prx_load_module_option_t> pOpt)
@@ -229,6 +285,11 @@ error_code _sys_prx_start_module(u32 id, u64 flags, vm::ptr<sys_prx_start_stop_m
 {
 	sys_prx.warning("_sys_prx_start_module(id=0x%x, flags=0x%x, pOpt=*0x%x)", id, flags, pOpt);
 
+	if (id == 0 || !pOpt)
+	{
+		return CELL_EINVAL;
+	}
+
 	const auto prx = idm::get<lv2_obj, lv2_prx>(id);
 
 	if (!prx)
@@ -236,10 +297,9 @@ error_code _sys_prx_start_module(u32 id, u64 flags, vm::ptr<sys_prx_start_stop_m
 		return CELL_ESRCH;
 	}
 
-	//if (prx->is_started)
-	//	return CELL_PRX_ERROR_ALREADY_STARTED;
+	if (prx->is_started.exchange(true))
+		return not_an_error(CELL_PRX_ERROR_ALREADY_STARTED);
 
-	//prx->is_started = true;
 	pOpt->entry.set(prx->start ? prx->start.addr() : ~0ull);
 	pOpt->entry2.set(prx->prologue ? prx->prologue.addr() : ~0ull);
 	return CELL_OK;
@@ -256,10 +316,9 @@ error_code _sys_prx_stop_module(u32 id, u64 flags, vm::ptr<sys_prx_start_stop_mo
 		return CELL_ESRCH;
 	}
 
-	//if (!prx->is_started)
-	//	return CELL_PRX_ERROR_ALREADY_STOPPED;
+	if (!prx->is_started.exchange(false))
+		return not_an_error(CELL_PRX_ERROR_ALREADY_STOPPED);
 
-	//prx->is_started = false;
 	pOpt->entry.set(prx->stop ? prx->stop.addr() : ~0ull);
 	pOpt->entry2.set(prx->epilogue ? prx->epilogue.addr() : ~0ull);
 
@@ -275,7 +334,7 @@ error_code _sys_prx_unload_module(u32 id, u64 flags, vm::ptr<sys_prx_unload_modu
 
 	if (!prx)
 	{
-		return CELL_ESRCH;
+		return CELL_PRX_ERROR_UNKNOWN_MODULE;
 	}
 
 	ppu_unload_prx(*prx);
@@ -339,23 +398,32 @@ error_code _sys_prx_get_module_info(u32 id, u64 flags, vm::ptr<sys_prx_module_in
 
 	const auto prx = idm::get<lv2_obj, lv2_prx>(id);
 
-	if (!pOpt || !pOpt->info || !prx)
+	if (!pOpt)
+	{
+		return CELL_EFAULT;
+	}
+
+	if (pOpt->size != pOpt.size() || !pOpt->info)
 	{
 		return CELL_EINVAL;
 	}
 
-	std::memset(pOpt->info->name, 0, 30);
-	std::memcpy(pOpt->info->name, prx->module_info_name, 28);
+	if (!prx)
+	{
+		return CELL_PRX_ERROR_UNKNOWN_MODULE;
+	}
+
+	strcpy_trunc(pOpt->info->name, prx->module_info_name);
 	pOpt->info->version[0] = prx->module_info_version[0];
 	pOpt->info->version[1] = prx->module_info_version[1];
 	pOpt->info->modattribute = prx->module_info_attributes;
 	pOpt->info->start_entry = prx->start.addr();
 	pOpt->info->stop_entry = prx->stop.addr();
-	pOpt->info->all_segments_num = prx->segs.size();
+	pOpt->info->all_segments_num = ::size32(prx->segs);
 	if (pOpt->info->filename)
 	{
-		std::strncpy(pOpt->info->filename.get_ptr(), prx->name.c_str(), pOpt->info->filename_size);
-		pOpt->info->filename[pOpt->info->filename_size - 1] = 0;
+		gsl::span dst(pOpt->info->filename.get_ptr(), pOpt->info->filename_size);
+		strcpy_trunc(dst, prx->name);
 	}
 
 	if (pOpt->info->segments)

@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Emu/Cell/PPUModule.h"
+#include "Emu/Memory/vm_ref.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -15,7 +16,7 @@ typedef const char *HostCode;
 
 #include "cellL10n.h"
 
-logs::channel cellL10n("cellL10n");
+LOG_CHANNEL(cellL10n);
 
 // Translate code id to code name. some codepage may has another name.
 // If this makes your compilation fail, try replace the string code with one in "iconv -l"
@@ -53,8 +54,8 @@ bool _L10nCodeParse(s32 code, HostCode& retCode)
 	case L10N_CODEPAGE_866:     retCode = 866;          return true;
 	case L10N_CODEPAGE_932:     retCode = 932;          return true;
 	case L10N_CODEPAGE_936:     retCode = 936;          return true; // GBK
-	case L10N_GBK:              retCode = 936;          return true; 
-	case L10N_CODEPAGE_949:     retCode = 949;          return true; // UHC 
+	case L10N_GBK:              retCode = 936;          return true;
+	case L10N_CODEPAGE_949:     retCode = 949;          return true; // UHC
 	case L10N_UHC:              retCode = 949;          return true; // UHC
 	case L10N_CODEPAGE_950:     retCode = 950;          return true;
 	case L10N_CODEPAGE_1251:    retCode = 1251;         return true; // CYRL
@@ -224,7 +225,7 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 		if (target.length() > *dst_len) return DSTExhausted;
 		memcpy(dst, target.c_str(), target.length());
 	}
-	*dst_len = target.length();
+	*dst_len = ::narrow<s32>(target.size());
 
 	return ConversionOK;
 #else
@@ -234,9 +235,9 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 	if (dst != NULL)
 	{
 		size_t dstLen = *dst_len;
-		size_t ictd = iconv(ict, (char **)&src, &srcLen, (char **)&dst, &dstLen);
+		size_t ictd = iconv(ict, const_cast<char**>(reinterpret_cast<const char**>(&src)), &srcLen, reinterpret_cast<char**>(&dst), &dstLen);
 		*dst_len -= dstLen;
-		if (ictd == -1)
+		if (ictd == umax)
 		{
 			if (errno == EILSEQ)
 				retValue = SRCIllegal;  //Invalid multi-byte sequence
@@ -259,9 +260,9 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 		{
 			char *bufPtr = buf;
 			size_t bufLeft = sizeof(buf);
-			size_t ictd = iconv(ict, (char **)&src, &srcLen, (char **)&bufPtr, &bufLeft);
+			size_t ictd = iconv(ict, const_cast<char**>(reinterpret_cast<const char**>(&src)), &srcLen, reinterpret_cast<char**>(&dst), &bufLeft);
 			*dst_len += sizeof(buf) - bufLeft;
-			if (ictd == -1 && errno != E2BIG)
+			if (ictd == umax && errno != E2BIG)
 			{
 				if (errno == EILSEQ)
 					retValue = SRCIllegal;
@@ -284,7 +285,7 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 s32 _L10nConvertStr(s32 src_code, vm::cptr<void> src, vm::cptr<s32> src_len, s32 dst_code, vm::ptr<void> dst, vm::ptr<s32> dst_len)
 {
 	s32 dstLen = *dst_len;
-	s32 result = _ConvertStr(src_code, src.get_ptr(), *src_len, dst_code, dst == vm::null ? NULL : dst.get_ptr(), &dstLen, false);
+	s32 result = _ConvertStr(src_code, src.get_ptr(), *src_len, dst_code, dst ? dst.get_ptr() : nullptr, &dstLen, false);
 	*dst_len = dstLen;
 	return result;
 }
@@ -409,23 +410,23 @@ s32 jis2sjis()
 s32 jstrnchk(vm::cptr<u8> src, s32 src_len)
 {
 	u8 r = 0;
-	
-	for (u32 len = 0; len < src_len; len++)
+
+	for (s32 len = 0; len < src_len; len++)
 	{
-		if (src != vm::null)
+		if (src)
 		{
 			if (*src >= 0xa1 && *src <= 0xfe)
 			{
 				cellL10n.warning("jstrnchk: EUCJP (src=*0x%x, src_len=*0x%x)", src, src_len);
 				r |= L10N_STR_EUCJP;
-			} 
-			else if( ((*src >=  0x81 && *src <= 0x9f) || (*src >= 0xe0 && *src <= 0xfc)) || (*src >= 0x40 && *src <= 0xfc && *src != 0x7f) ) 
+			}
+			else if( ((*src >=  0x81 && *src <= 0x9f) || (*src >= 0xe0 && *src <= 0xfc)) || (*src >= 0x40 && *src <= 0xfc && *src != 0x7f) )
 			{
 				cellL10n.warning("jstrnchk: SJIS (src=*0x%x, src_len=*0x%x)", src, src_len);
 				r |= L10N_STR_SJIS;
 			}
 			// ISO-2022-JP. (JIS X 0202) That's an inaccurate general range which (contains ASCII and UTF-8 characters?).
-			else if (*src >= 0x21 && *src <= 0x7e) 
+			else if (*src >= 0x21 && *src <= 0x7e)
 			{
 				cellL10n.warning("jstrnchk: JIS (src=*0x%x, src_len=*0x%x)", src, src_len);
 				r |= L10N_STR_JIS;
@@ -437,7 +438,7 @@ s32 jstrnchk(vm::cptr<u8> src, s32 src_len)
 			// TODO:
 			// L10N_STR_ASCII
 			// L10N_STR_UTF8
-			
+
 			// L10N_STR_UNKNOWN
 			// L10N_STR_ILLEGAL
 			// L10N_STR_ERROR
@@ -485,7 +486,8 @@ s32 GBKtoUCS2()
 
 s32 eucjp2jis()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellL10n.todo("eucjp2jis()");
+	return CELL_OK;
 }
 
 s32 UTF32stoUTF8s(vm::cptr<u32> src, vm::cptr<s32> src_len, vm::ptr<u8> dst, vm::ptr<s32> dst_len)
@@ -683,7 +685,7 @@ s32 EUCKRtoUHC()
 s32 UCS2toSJIS(u16 ch, vm::ptr<void> dst)
 {
 	cellL10n.todo("UCS2toSJIS(ch=%d, dst=*0x%x)", ch, dst);
-	// Should be L10N_UCS2 (16bit) not L10N_UTF8 (8bit) and L10N_SHIFT_JIS 
+	// Should be L10N_UCS2 (16bit) not L10N_UTF8 (8bit) and L10N_SHIFT_JIS
 	// return _L10nConvertCharNoResult(L10N_UTF8, &ch, sizeof(ch), L10N_CODEPAGE_932, dst);
 	return 0;
 }
@@ -1212,7 +1214,8 @@ s32 BIG5stoUTF8s(vm::cptr<u8> src, vm::cptr<s32> src_len, vm::ptr<u8> dst, vm::p
 
 s32 EUCCNtoUCS2()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellL10n.todo("EUCCNtoUCS2()");
+	return CELL_OK;
 }
 
 s32 UTF8stoSBCSs()
@@ -1257,7 +1260,7 @@ s32 UTF16stoUTF8s(vm::cptr<u16> utf16, vm::ref<s32> utf16_len, vm::ptr<u8> utf8,
 
 	const u32 max_len = utf8_len; utf8_len = 0;
 
-	for (u32 i = 0, len = 0; i < utf16_len; i++, utf8_len = len)
+	for (u32 i = 0, len = 0; i < static_cast<u32>(utf16_len); i++, utf8_len = len)
 	{
 		const u16 ch = utf16[i];
 
@@ -1271,7 +1274,7 @@ s32 UTF16stoUTF8s(vm::cptr<u16> utf16, vm::ref<s32> utf16_len, vm::ptr<u8> utf8,
 		//	return SRCIllegal;
 		//}
 
-		if (utf8 != vm::null)
+		if (utf8)
 		{
 			if (len > max_len)
 			{

@@ -95,7 +95,7 @@ public:
 		GetProcessTimes(m_self, &ftime, &ftime, &fsys, &fusr);
 		memcpy(&sys, &fsys, sizeof(FILETIME));
 		memcpy(&usr, &fusr, sizeof(FILETIME));
-		double percent = (sys.QuadPart - m_sys_cpu.QuadPart) + (usr.QuadPart - m_usr_cpu.QuadPart);
+		double percent = double(sys.QuadPart - m_sys_cpu.QuadPart) + (usr.QuadPart - m_usr_cpu.QuadPart);
 		percent /= (now.QuadPart - m_last_cpu.QuadPart);
 		percent /= m_num_processors;
 
@@ -174,7 +174,7 @@ public:
 			1,
 #endif
 		};
-		u_int miblen = sizeof(mib) / sizeof(mib[0]);
+		u_int miblen = std::size(mib);
 		struct kinfo_proc info;
 		size_t size = sizeof(info);
 		if (sysctl(mib, miblen, &info, &size, NULL, 0))
@@ -191,7 +191,7 @@ public:
 			sizeof(struct kinfo_proc),
 			0,
 		};
-		u_int miblen = sizeof(mib) / sizeof(mib[0]);
+		u_int miblen = std::size(mib);
 
 		// get number of structs
 		size_t size;

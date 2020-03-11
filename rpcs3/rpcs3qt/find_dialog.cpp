@@ -1,4 +1,4 @@
-#include "find_dialog.h"
+﻿#include "find_dialog.h"
 
 #include <QVBoxLayout>
 
@@ -33,16 +33,12 @@ find_dialog::find_dialog(QTextEdit* edit, QWidget *parent, Qt::WindowFlags f) : 
 	layout->addLayout(button_layout);
 	setLayout(layout);
 
-	connect(m_find_first, &QPushButton::pressed, this, &find_dialog::find_first);
-	connect(m_find_last, &QPushButton::pressed, this, &find_dialog::find_last);
-	connect(m_find_next, &QPushButton::pressed, this, &find_dialog::find_next);
-	connect(m_find_previous, &QPushButton::pressed, this, &find_dialog::find_previous);
+	connect(m_find_first, &QPushButton::clicked, this, &find_dialog::find_first);
+	connect(m_find_last, &QPushButton::clicked, this, &find_dialog::find_last);
+	connect(m_find_next, &QPushButton::clicked, this, &find_dialog::find_next);
+	connect(m_find_previous, &QPushButton::clicked, this, &find_dialog::find_previous);
 
 	show();
-}
-
-find_dialog::~find_dialog()
-{
 }
 
 int find_dialog::count_all()

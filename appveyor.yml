@@ -1,17 +1,16 @@
 
 version: '{build}'
 
-image: Visual Studio 2015
+image: Visual Studio 2019
 
 environment:
-  QTDIR: C:\Qt\5.11\msvc2015_64
-  LLVMLIBS: https://github.com/RPCS3/llvm/releases/download/continuous-release_60/llvmlibs.7z
-  GLSLANG: https://drive.google.com/uc?export=download&id=1nJK_NEeRzJ_r_u4zWLySwLmMrV8ZO_wL
+  QTDIR: C:\Qt\5.14\msvc2017_64
+  LLVMLIBS: https://github.com/RPCS3/llvm-mirror/releases/download/custom-build-win/llvmlibs.7z
+  GLSLANG: https://www.dropbox.com/s/6e8w6t5dxh3ad4l/glslang.7z?dl=1
   COMPATDB: https://rpcs3.net/compatibility?api=v1&export
-  VULKAN_SDK: "C:\\VulkanSDK\\1.1.73.0"
-  VULKAN_SDK_URL: https://sdk.lunarg.com/sdk/download/1.1.73.0/windows/VulkanSDK-1.1.73.0-Installer.exe
-  VULKAN_SDK_MIRROR: https://obk.ee/rpcs3/VulkanSDK-1.1.73.0-Installer.exe
-  VULKAN_SDK_SHA: a5d193f97db4de97e6b4fdd81f00ff6a603f66bb17dc3cf8ac0fe9aec58497c7
+  VULKAN_SDK: "C:\\VulkanSDK\\1.1.126.0"
+  VULKAN_SDK_URL: https://sdk.lunarg.com/sdk/download/1.1.126.0/windows/VulkanSDK-1.1.126.0-Installer.exe
+  VULKAN_SDK_SHA: ee86f25580b550390ce46508415e744d62e87e9c0de6cd299998058253a2a4ba
 
 cache:
 - glslang.7z -> appveyor.yml
@@ -20,16 +19,16 @@ cache:
 
 install:
 - ps: | # set env vars for versioning
-    $env:COMM_TAG = $(git describe --tags $(git rev-list --tags --max-count=1))
+    $env:COMM_TAG = $(Get-Content ./rpcs3/rpcs3_version.cpp | findstr 'version{.*}' | %{ $ver = $_ -split "[{,]"; "{0}.{1}.{2}" -f [int]$ver[1],[int]$ver[2],[int]$ver[3]; })
     $env:COMM_COUNT = $(git rev-list --count HEAD)
-    $env:COMM_HASH = $env:APPVEYOR_REPO_COMMIT.Substring(0,8)
+    $env:COMM_HASH = $(git rev-parse --short=8 HEAD)
 
     if ($env:APPVEYOR_PULL_REQUEST_NUMBER) {
-        $env:BUILD = "rpcs3-{0}-{1}_win64.7z" -f $env:COMM_TAG, $env:COMM_HASH
+        $env:BUILD = "rpcs3-v{0}-{1}_win64.7z" -f $env:COMM_TAG, $env:COMM_HASH
         $env:AVVER = "{0}-{1}" -f $env:COMM_TAG.TrimStart("v"), $env:COMM_HASH
     }
     else {
-        $env:BUILD = "rpcs3-{0}-{1}-{2}_win64.7z" -f $env:COMM_TAG, $env:COMM_COUNT, $env:COMM_HASH
+        $env:BUILD = "rpcs3-v{0}-{1}-{2}_win64.7z" -f $env:COMM_TAG, $env:COMM_COUNT, $env:COMM_HASH
         $env:AVVER = "{0}-{1}" -f $env:COMM_TAG.TrimStart("v"), $env:COMM_COUNT
     }
 
@@ -46,14 +45,15 @@ install:
     git submodule -q update --init `
       3rdparty/cereal `
       3rdparty/ffmpeg `
-      3rdparty/GSL `
+      3rdparty/span `
       3rdparty/hidapi `
       3rdparty/libpng `
-      3rdparty/Optional `
+      3rdparty/libusb `
       3rdparty/pugixml `
       3rdparty/xxHash `
       3rdparty/yaml-cpp `
       3rdparty/zlib `
+      3rdparty/FAudio `
       asmjit `
       Vulkan/glslang
 
@@ -69,7 +69,6 @@ build:
 before_build:
 - ps: | # initialize mirror arrays and fetch precompiled build dependencies
     $VULKAN_SDK_URLS = @(
-        $env:VULKAN_SDK_MIRROR;
         $env:VULKAN_SDK_URL;
         "$($env:VULKAN_SDK_URL)?Human=true";
     )
@@ -107,9 +106,9 @@ after_build:
 
 - ps: | # package artifacts
     7z a -m0=LZMA2 -mx9 $env:BUILD .\bin\*
-    7z a -m0=LZMA2 -mx9 openssl_win64.7z C:\OpenSSL-Win64\bin\libeay32.dll `
-      C:\OpenSSL-Win64\bin\ssleay32.dll
-    $env:FILESIZEMB = (Get-Item $env:BUILD).length/1MB
+    7z a -m0=LZMA2 -mx9 openssl_win64.7z C:\OpenSSL-v111-Win64\bin\libcrypto-1_1-x64.dll `
+      C:\OpenSSL-v111-Win64\bin\libssl-1_1-x64.dll
+    $env:FILESIZE = (Get-Item $env:BUILD).length
 
 - ps: | # generate sha256 hashes
     (get-filehash $env:BUILD -algorithm SHA256).Hash | out-file ("{0}.sha256" -f $env:BUILD) -encoding ascii
@@ -127,11 +126,11 @@ artifacts:
   name: openssl
 - path: openssl_win64.7z.sha256
   name: openssl sha256 hash
-  
+
 deploy:
     provider: GitHub
     # Description is a semi-colon seperated list for easy parsing
-    description: "$(SHA256SUM);$(FILESIZEMB)MB"
+    description: "$(SHA256SUM);$(FILESIZE)B"
     tag: build-$(APPVEYOR_REPO_COMMIT)
     release: $(AVVER)
     artifact: $(BUILD)

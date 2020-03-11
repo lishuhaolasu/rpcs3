@@ -1,23 +1,20 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "sys_mutex.h"
+
 #include "Emu/IdManager.h"
 #include "Emu/IPC.h"
 
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/PPUThread.h"
-#include "sys_mutex.h"
 
-
-
-logs::channel sys_mutex("sys_mutex");
+LOG_CHANNEL(sys_mutex);
 
 template<> DECLARE(ipc_manager<lv2_mutex, u64>::g_ipc) {};
 
-extern u64 get_system_time();
-
-error_code sys_mutex_create(vm::ptr<u32> mutex_id, vm::ptr<sys_mutex_attribute_t> attr)
+error_code sys_mutex_create(ppu_thread& ppu, vm::ptr<u32> mutex_id, vm::ptr<sys_mutex_attribute_t> attr)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_mutex.warning("sys_mutex_create(mutex_id=*0x%x, attr=*0x%x)", mutex_id, attr);
 
 	if (!mutex_id || !attr)
@@ -30,7 +27,7 @@ error_code sys_mutex_create(vm::ptr<u32> mutex_id, vm::ptr<sys_mutex_attribute_t
 	case SYS_SYNC_FIFO: break;
 	case SYS_SYNC_PRIORITY: break;
 	case SYS_SYNC_PRIORITY_INHERIT:
-		sys_mutex.fatal("sys_mutex_create(): SYS_SYNC_PRIORITY_INHERIT");
+		sys_mutex.warning("sys_mutex_create(): SYS_SYNC_PRIORITY_INHERIT");
 		break;
 	default:
 	{
@@ -74,12 +71,16 @@ error_code sys_mutex_create(vm::ptr<u32> mutex_id, vm::ptr<sys_mutex_attribute_t
 	return CELL_OK;
 }
 
-error_code sys_mutex_destroy(u32 mutex_id)
+error_code sys_mutex_destroy(ppu_thread& ppu, u32 mutex_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_mutex.warning("sys_mutex_destroy(mutex_id=0x%x)", mutex_id);
 
 	const auto mutex = idm::withdraw<lv2_obj, lv2_mutex>(mutex_id, [](lv2_mutex& mutex) -> CellError
 	{
+		std::lock_guard lock(mutex.mutex);
+
 		if (mutex.owner || mutex.lock_count)
 		{
 			return CELL_EBUSY;
@@ -108,6 +109,8 @@ error_code sys_mutex_destroy(u32 mutex_id)
 
 error_code sys_mutex_lock(ppu_thread& ppu, u32 mutex_id, u64 timeout)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_mutex.trace("sys_mutex_lock(mutex_id=0x%x, timeout=0x%llx)", mutex_id, timeout);
 
 	const auto mutex = idm::get<lv2_obj, lv2_mutex>(mutex_id, [&](lv2_mutex& mutex)
@@ -116,7 +119,7 @@ error_code sys_mutex_lock(ppu_thread& ppu, u32 mutex_id, u64 timeout)
 
 		if (result == CELL_EBUSY)
 		{
-			semaphore_lock lock(mutex.mutex);
+			std::lock_guard lock(mutex.mutex);
 
 			if (mutex.try_own(ppu, ppu.id))
 			{
@@ -152,13 +155,16 @@ error_code sys_mutex_lock(ppu_thread& ppu, u32 mutex_id, u64 timeout)
 
 	while (!ppu.state.test_and_reset(cpu_flag::signal))
 	{
+		if (ppu.is_stopped())
+		{
+			return 0;
+		}
+
 		if (timeout)
 		{
-			const u64 passed = get_system_time() - ppu.start_time;
-
-			if (passed >= timeout)
+			if (lv2_obj::wait_timeout(timeout, &ppu))
 			{
-				semaphore_lock lock(mutex->mutex);
+				std::lock_guard lock(mutex->mutex);
 
 				if (!mutex->unqueue(mutex->sq, &ppu))
 				{
@@ -169,8 +175,6 @@ error_code sys_mutex_lock(ppu_thread& ppu, u32 mutex_id, u64 timeout)
 				ppu.gpr[3] = CELL_ETIMEDOUT;
 				break;
 			}
-
-			thread_ctrl::wait_for(timeout - passed);
 		}
 		else
 		{
@@ -183,6 +187,8 @@ error_code sys_mutex_lock(ppu_thread& ppu, u32 mutex_id, u64 timeout)
 
 error_code sys_mutex_trylock(ppu_thread& ppu, u32 mutex_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_mutex.trace("sys_mutex_trylock(mutex_id=0x%x)", mutex_id);
 
 	const auto mutex = idm::check<lv2_obj, lv2_mutex>(mutex_id, [&](lv2_mutex& mutex)
@@ -210,6 +216,8 @@ error_code sys_mutex_trylock(ppu_thread& ppu, u32 mutex_id)
 
 error_code sys_mutex_unlock(ppu_thread& ppu, u32 mutex_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_mutex.trace("sys_mutex_unlock(mutex_id=0x%x)", mutex_id);
 
 	const auto mutex = idm::check<lv2_obj, lv2_mutex>(mutex_id, [&](lv2_mutex& mutex)
@@ -224,11 +232,11 @@ error_code sys_mutex_unlock(ppu_thread& ppu, u32 mutex_id)
 
 	if (mutex.ret == CELL_EBUSY)
 	{
-		semaphore_lock lock(mutex->mutex);
+		std::lock_guard lock(mutex->mutex);
 
 		if (auto cpu = mutex->reown<ppu_thread>())
 		{
-			mutex->awake(*cpu);
+			mutex->awake(cpu);
 		}
 	}
 	else if (mutex.ret)

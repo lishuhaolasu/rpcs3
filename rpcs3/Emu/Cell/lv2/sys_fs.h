@@ -1,7 +1,10 @@
-#pragma once
+﻿#pragma once
 
-#include "Emu/Memory/Memory.h"
+#include "Emu/Memory/vm_ptr.h"
 #include "Emu/Cell/ErrorCodes.h"
+#include "Utilities/File.h"
+
+#include <string>
 
 // Open Flags
 enum : s32
@@ -120,6 +123,15 @@ struct FsMselfEntry
 
 struct lv2_fs_mount_point;
 
+enum class lv2_mp_flag
+{
+	read_only,
+	no_uid_gid,
+	strict_get_block_size,
+
+	__bitset_enum_max
+};
+
 struct lv2_fs_object
 {
 	using id_type = lv2_fs_object;
@@ -134,29 +146,25 @@ struct lv2_fs_object
 	// File Name (max 1055)
 	const std::array<char, 0x420> name;
 
-	lv2_fs_object(lv2_fs_mount_point* mp, const char* filename)
+	lv2_fs_object(lv2_fs_mount_point* mp, std::string_view filename)
 		: mp(mp)
 		, name(get_name(filename))
 	{
 	}
 
-	static lv2_fs_mount_point* get_mp(const char* filename);
+	static lv2_fs_mount_point* get_mp(std::string_view filename);
 
-	static std::array<char, 0x420> get_name(const char* filename)
+	static std::array<char, 0x420> get_name(std::string_view filename)
 	{
 		std::array<char, 0x420> name;
 
-		for (auto& c : name)
+		if (filename.size() >= 0x420)
 		{
-			c = *filename++;
-
-			if (!c)
-			{
-				return name;
-			}
+			filename = filename.substr(0, 0x420 - 1);
 		}
 
-		name.back() = 0;
+		filename.copy(name.data(), filename.size());
+		name[filename.size()] = 0;
 		return name;
 	}
 };
@@ -170,7 +178,7 @@ struct lv2_file final : lv2_fs_object
 	// Stream lock
 	atomic_t<u32> lock{0};
 
-	lv2_file(const char* filename, fs::file&& file, s32 mode, s32 flags)
+	lv2_file(std::string_view filename, fs::file&& file, s32 mode, s32 flags)
 		: lv2_fs_object(lv2_fs_object::get_mp(filename), filename)
 		, file(std::move(file))
 		, mode(mode)
@@ -186,11 +194,31 @@ struct lv2_file final : lv2_fs_object
 	{
 	}
 
+	struct open_result_t
+	{
+		CellError error;
+		std::string ppath;
+		fs::file file;
+	};
+
+	// Open a file with wrapped logic of sys_fs_open
+	static open_result_t open(std::string_view path, s32 flags, s32 mode, const void* arg = {}, u64 size = 0);
+
 	// File reading with intermediate buffer
-	u64 op_read(vm::ptr<void> buf, u64 size);
+	static u64 op_read(const fs::file& file, vm::ptr<void> buf, u64 size);
+
+	u64 op_read(vm::ptr<void> buf, u64 size)
+	{
+		return op_read(file, buf, size);
+	}
 
 	// File writing with intermediate buffer
-	u64 op_write(vm::cptr<void> buf, u64 size);
+	static u64 op_write(const fs::file& file, vm::cptr<void> buf, u64 size);
+
+	u64 op_write(vm::cptr<void> buf, u64 size)
+	{
+		return op_write(file, buf, size);
+	}
 
 	// For MSELF support
 	struct file_view;
@@ -201,12 +229,26 @@ struct lv2_file final : lv2_fs_object
 
 struct lv2_dir final : lv2_fs_object
 {
-	const fs::dir dir;
+	const std::vector<fs::dir_entry> entries;
 
-	lv2_dir(const char* filename, fs::dir&& dir)
+	// Current reading position
+	atomic_t<u64> pos{0};
+
+	lv2_dir(std::string_view filename, std::vector<fs::dir_entry>&& entries)
 		: lv2_fs_object(lv2_fs_object::get_mp(filename), filename)
-		, dir(std::move(dir))
+		, entries(std::move(entries))
 	{
+	}
+
+	// Read next
+	const fs::dir_entry* dir_read()
+	{
+		if (const u64 cur = pos++; cur < entries.size())
+		{
+			return &entries[cur];
+		}
+
+		return nullptr;
 	}
 };
 
@@ -316,12 +358,12 @@ struct lv2_file_c0000006 : lv2_file_op
 {
 	be_t<u32> size; // 0x20
 	be_t<u32> _x4;  // 0x10
-	be_t<u32> _x8;  // 0x18
-	be_t<u32> _xc;  // 0x9
+	be_t<u32> _x8;  // 0x18 - offset of out_code
+	be_t<u32> name_size;
 	vm::bcptr<char> name;
 	be_t<u32> _x14; // 0
-	be_t<u32> _x18; // 0x80010003
-	be_t<u32> _x1c; // 0
+	be_t<u32> out_code; // 0x80010003
+	be_t<u32> out_id; // set to 0, may return 0x1b5
 };
 
 CHECK_SIZE(lv2_file_c0000006, 0x20);
@@ -340,45 +382,62 @@ struct lv2_file_e0000017 : lv2_file_op
 
 CHECK_SIZE(lv2_file_e0000017, 0x28);
 
+struct CellFsMountInfo
+{
+	char mount_path[0x20]; // 0x0
+	char filesystem[0x20]; // 0x20
+	char dev_name[0x40];   // 0x40
+	be_t<u32> unk1;        // 0x80
+	be_t<u32> unk2;        // 0x84
+	be_t<u32> unk3;        // 0x88
+	be_t<u32> unk4;        // 0x8C
+	be_t<u32> unk5;        // 0x90
+};
+
+CHECK_SIZE(CellFsMountInfo, 0x94);
+
 // Syscalls
 
-error_code sys_fs_test(u32 arg1, u32 arg2, vm::ptr<u32> arg3, u32 arg4, vm::ptr<char> buf, u32 buf_size);
-error_code sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::cptr<void> arg, u64 size);
-error_code sys_fs_read(u32 fd, vm::ptr<void> buf, u64 nbytes, vm::ptr<u64> nread);
-error_code sys_fs_write(u32 fd, vm::cptr<void> buf, u64 nbytes, vm::ptr<u64> nwrite);
-error_code sys_fs_close(u32 fd);
-error_code sys_fs_opendir(vm::cptr<char> path, vm::ptr<u32> fd);
-error_code sys_fs_readdir(u32 fd, vm::ptr<CellFsDirent> dir, vm::ptr<u64> nread);
-error_code sys_fs_closedir(u32 fd);
-error_code sys_fs_stat(vm::cptr<char> path, vm::ptr<CellFsStat> sb);
-error_code sys_fs_fstat(u32 fd, vm::ptr<CellFsStat> sb);
-error_code sys_fs_link(vm::cptr<char> from, vm::cptr<char> to);
-error_code sys_fs_mkdir(vm::cptr<char> path, s32 mode);
-error_code sys_fs_rename(vm::cptr<char> from, vm::cptr<char> to);
-error_code sys_fs_rmdir(vm::cptr<char> path);
-error_code sys_fs_unlink(vm::cptr<char> path);
-error_code sys_fs_access(vm::cptr<char> path, s32 mode);
-error_code sys_fs_fcntl(u32 fd, u32 op, vm::ptr<void> arg, u32 size);
-error_code sys_fs_lseek(u32 fd, s64 offset, s32 whence, vm::ptr<u64> pos);
-error_code sys_fs_fdatasync(u32 fd);
-error_code sys_fs_fsync(u32 fd);
-error_code sys_fs_fget_block_size(u32 fd, vm::ptr<u64> sector_size, vm::ptr<u64> block_size, vm::ptr<u64> arg4, vm::ptr<s32> arg5);
-error_code sys_fs_get_block_size(vm::cptr<char> path, vm::ptr<u64> sector_size, vm::ptr<u64> block_size, vm::ptr<u64> arg4);
-error_code sys_fs_truncate(vm::cptr<char> path, u64 size);
-error_code sys_fs_ftruncate(u32 fd, u64 size);
-error_code sys_fs_symbolic_link(vm::cptr<char> target, vm::cptr<char> linkpath);
-error_code sys_fs_chmod(vm::cptr<char> path, s32 mode);
-error_code sys_fs_chown(vm::cptr<char> path, s32 uid, s32 gid);
-error_code sys_fs_disk_free(vm::cptr<char> path, vm::ptr<u64> total_free, vm::ptr<u64> avail_free);
-error_code sys_fs_utime(vm::cptr<char> path, vm::cptr<CellFsUtimbuf> timep);
-error_code sys_fs_acl_read(vm::cptr<char> path, vm::ptr<void>);
-error_code sys_fs_acl_write(vm::cptr<char> path, vm::ptr<void>);
-error_code sys_fs_lsn_get_cda_size(u32 fd, vm::ptr<u64> ptr);
-error_code sys_fs_lsn_get_cda(u32 fd, vm::ptr<void>, u64, vm::ptr<u64>);
-error_code sys_fs_lsn_lock(u32 fd);
-error_code sys_fs_lsn_unlock(u32 fd);
-error_code sys_fs_lsn_read(u32 fd, vm::cptr<void>, u64);
-error_code sys_fs_lsn_write(u32 fd, vm::cptr<void>, u64);
-error_code sys_fs_mapped_allocate(u32 fd, u64, vm::pptr<void> out_ptr);
-error_code sys_fs_mapped_free(u32 fd, vm::ptr<void> ptr);
-error_code sys_fs_truncate2(u32 fd, u64 size);
+error_code sys_fs_test(ppu_thread& ppu, u32 arg1, u32 arg2, vm::ptr<u32> arg3, u32 arg4, vm::ptr<char> buf, u32 buf_size);
+error_code sys_fs_open(ppu_thread& ppu, vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::cptr<void> arg, u64 size);
+error_code sys_fs_read(ppu_thread& ppu, u32 fd, vm::ptr<void> buf, u64 nbytes, vm::ptr<u64> nread);
+error_code sys_fs_write(ppu_thread& ppu, u32 fd, vm::cptr<void> buf, u64 nbytes, vm::ptr<u64> nwrite);
+error_code sys_fs_close(ppu_thread& ppu, u32 fd);
+error_code sys_fs_opendir(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<u32> fd);
+error_code sys_fs_readdir(ppu_thread& ppu, u32 fd, vm::ptr<CellFsDirent> dir, vm::ptr<u64> nread);
+error_code sys_fs_closedir(ppu_thread& ppu, u32 fd);
+error_code sys_fs_stat(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<CellFsStat> sb);
+error_code sys_fs_fstat(ppu_thread& ppu, u32 fd, vm::ptr<CellFsStat> sb);
+error_code sys_fs_link(ppu_thread& ppu, vm::cptr<char> from, vm::cptr<char> to);
+error_code sys_fs_mkdir(ppu_thread& ppu, vm::cptr<char> path, s32 mode);
+error_code sys_fs_rename(ppu_thread& ppu, vm::cptr<char> from, vm::cptr<char> to);
+error_code sys_fs_rmdir(ppu_thread& ppu, vm::cptr<char> path);
+error_code sys_fs_unlink(ppu_thread& ppu, vm::cptr<char> path);
+error_code sys_fs_access(ppu_thread& ppu, vm::cptr<char> path, s32 mode);
+error_code sys_fs_fcntl(ppu_thread& ppu, u32 fd, u32 op, vm::ptr<void> arg, u32 size);
+error_code sys_fs_lseek(ppu_thread& ppu, u32 fd, s64 offset, s32 whence, vm::ptr<u64> pos);
+error_code sys_fs_fdatasync(ppu_thread& ppu, u32 fd);
+error_code sys_fs_fsync(ppu_thread& ppu, u32 fd);
+error_code sys_fs_fget_block_size(ppu_thread& ppu, u32 fd, vm::ptr<u64> sector_size, vm::ptr<u64> block_size, vm::ptr<u64> arg4, vm::ptr<s32> out_flags);
+error_code sys_fs_get_block_size(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<u64> sector_size, vm::ptr<u64> block_size, vm::ptr<u64> arg4);
+error_code sys_fs_truncate(ppu_thread& ppu, vm::cptr<char> path, u64 size);
+error_code sys_fs_ftruncate(ppu_thread& ppu, u32 fd, u64 size);
+error_code sys_fs_symbolic_link(ppu_thread& ppu, vm::cptr<char> target, vm::cptr<char> linkpath);
+error_code sys_fs_chmod(ppu_thread& ppu, vm::cptr<char> path, s32 mode);
+error_code sys_fs_chown(ppu_thread& ppu, vm::cptr<char> path, s32 uid, s32 gid);
+error_code sys_fs_disk_free(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<u64> total_free, vm::ptr<u64> avail_free);
+error_code sys_fs_utime(ppu_thread& ppu, vm::cptr<char> path, vm::cptr<CellFsUtimbuf> timep);
+error_code sys_fs_acl_read(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<void>);
+error_code sys_fs_acl_write(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<void>);
+error_code sys_fs_lsn_get_cda_size(ppu_thread& ppu, u32 fd, vm::ptr<u64> ptr);
+error_code sys_fs_lsn_get_cda(ppu_thread& ppu, u32 fd, vm::ptr<void>, u64, vm::ptr<u64>);
+error_code sys_fs_lsn_lock(ppu_thread& ppu, u32 fd);
+error_code sys_fs_lsn_unlock(ppu_thread& ppu, u32 fd);
+error_code sys_fs_lsn_read(ppu_thread& ppu, u32 fd, vm::cptr<void>, u64);
+error_code sys_fs_lsn_write(ppu_thread& ppu, u32 fd, vm::cptr<void>, u64);
+error_code sys_fs_mapped_allocate(ppu_thread& ppu, u32 fd, u64, vm::pptr<void> out_ptr);
+error_code sys_fs_mapped_free(ppu_thread& ppu, u32 fd, vm::ptr<void> ptr);
+error_code sys_fs_truncate2(ppu_thread& ppu, u32 fd, u64 size);
+error_code sys_fs_mount(ppu_thread& ppu, vm::cptr<char> dev_name, vm::cptr<char> file_system, vm::cptr<char> path, s32 unk1, s32 prot, s32 unk3, vm::cptr<char> str1, u32 str_len);
+error_code sys_fs_get_mount_info_size(ppu_thread& ppu, vm::ptr<u64> len);
+error_code sys_fs_get_mount_info(ppu_thread& ppu, vm::ptr<CellFsMountInfo> info, u32 len, vm::ptr<u64> out_len);

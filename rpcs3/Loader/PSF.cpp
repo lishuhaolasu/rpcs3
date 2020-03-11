@@ -1,5 +1,7 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "PSF.h"
+
+LOG_CHANNEL(psf_log, "PSF");
 
 template<>
 void fmt_class_string<psf::format>::format(std::string& out, u64 arg)
@@ -19,8 +21,6 @@ void fmt_class_string<psf::format>::format(std::string& out, u64 arg)
 
 namespace psf
 {
-	logs::channel log("PSF");
-
 	struct header_t
 	{
 		le_t<u32> magic;
@@ -94,7 +94,7 @@ namespace psf
 			return std::min(m_max_size, ::narrow<u32>(m_value_string.size() + (m_type == format::string)));
 
 		case format::integer:
-			return SIZE_32(u32);
+			return sizeof(u32);
 		}
 
 		fmt::throw_exception("Invalid format (0x%x)" HERE, m_type);
@@ -105,7 +105,7 @@ namespace psf
 		registry result;
 
 		// Hack for empty input (TODO)
-		if (!stream)
+		if (!stream || !stream.size())
 		{
 			return result;
 		}
@@ -117,7 +117,7 @@ namespace psf
 		// Check magic and version
 		verify(HERE),
 			header.magic == "\0PSF"_u32,
-			header.version == 0x101,
+			header.version == 0x101u,
 			sizeof(header_t) + header.entries_num * sizeof(def_table_t) <= header.off_key_table,
 			header.off_key_table <= header.off_data_table,
 			header.off_data_table <= stream.size();
@@ -178,7 +178,7 @@ namespace psf
 			else
 			{
 				// Possibly unsupported format, entry ignored
-				log.error("Unknown entry format (key='%s', fmt=0x%x, len=0x%x, max=0x%x)", key, indices[i].param_fmt, indices[i].param_len, indices[i].param_max);
+				psf_log.error("Unknown entry format (key='%s', fmt=0x%x, len=0x%x, max=0x%x)", key, indices[i].param_fmt, indices[i].param_len, indices[i].param_max);
 			}
 		}
 
@@ -252,7 +252,7 @@ namespace psf
 				if (value.size() + (fmt == format::string) > max)
 				{
 					// TODO: check real limitations of PSF format
-					log.error("Entry value shrinkage (key='%s', value='%s', size=0x%zx, max=0x%x)", entry.first, value, size, max);
+					psf_log.error("Entry value shrinkage (key='%s', value='%s', size=0x%zx, max=0x%x)", entry.first, value, size, max);
 				}
 
 				stream.write(value);

@@ -1,21 +1,26 @@
+﻿#include "msg_dialog_frame.h"
+#include "custom_dialog.h"
 
-#include "msg_dialog_frame.h"
+#include <QPushButton>
+#include <QFormLayout>
 
-#include <QApplication>
-#include <QScreen>
-#include <QThread>
+#ifdef _WIN32
+#include <QWinTHumbnailToolbar>
+#include <QWinTHumbnailToolbutton>
+#elif HAVE_QTDBUS
+#include <QtDBus/QDBusMessage>
+#include <QtDBus/QDBusConnection>
+#endif
 
 constexpr auto qstr = QString::fromStdString;
 
 void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 {
+	state = MsgDialogState::Open;
+
 	static const auto& barWidth = [](){return QLabel("This is the very length of the progressbar due to hidpi reasons.").sizeHint().width();};
 
-	if (m_dialog)
-	{
-		m_dialog->close();
-		delete m_dialog;
-	}
+	Close(true);
 
 	m_dialog = new custom_dialog(type.disable_cancel);
 	m_dialog->setWindowTitle(title.empty() ? (type.se_normal ? "Normal dialog" : "Error dialog") : qstr(title));
@@ -24,12 +29,12 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 	m_text = new QLabel(qstr(msg));
 	m_text->setAlignment(Qt::AlignCenter);
 
-	//Layout
+	// Layout
 	QFormLayout* layout = new QFormLayout(m_dialog);
 	layout->setFormAlignment(Qt::AlignHCenter);
 	layout->addRow(m_text);
 
-	auto l_AddGauge = [=] (QProgressBar* &bar, QLabel* &text)
+	auto l_AddGauge = [=, this](QProgressBar* &bar, QLabel* &text)
 	{
 		text = new QLabel("", m_dialog);
 		bar = new QProgressBar(m_dialog);
@@ -75,8 +80,8 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 	{
 		m_dialog->setModal(true);
 
-		m_button_yes = new QPushButton("&Yes", m_dialog);
-		m_button_no = new QPushButton("&No", m_dialog);
+		QPushButton* m_button_yes = new QPushButton("&Yes", m_dialog);
+		QPushButton* m_button_no = new QPushButton("&No", m_dialog);
 
 		QHBoxLayout* hBoxButtons = new QHBoxLayout;
 		hBoxButtons->setAlignment(Qt::AlignCenter);
@@ -93,14 +98,16 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 			m_button_yes->setFocus();
 		}
 
-		connect(m_button_yes, &QAbstractButton::clicked, [=]
+		connect(m_button_yes, &QAbstractButton::clicked, [this]()
 		{
+			g_last_user_response = CELL_MSGDIALOG_BUTTON_YES;
 			on_close(CELL_MSGDIALOG_BUTTON_YES);
 			m_dialog->accept();
 		});
 
-		connect(m_button_no, &QAbstractButton::clicked, [=]
+		connect(m_button_no, &QAbstractButton::clicked, [this]()
 		{
+			g_last_user_response = CELL_MSGDIALOG_BUTTON_NO;
 			on_close(CELL_MSGDIALOG_BUTTON_NO);
 			m_dialog->accept();
 		});
@@ -110,7 +117,7 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 	{
 		m_dialog->setModal(true);
 
-		m_button_ok = new QPushButton("&OK", m_dialog);
+		QPushButton* m_button_ok = new QPushButton("&OK", m_dialog);
 		m_button_ok->setFixedWidth(50);
 
 		QHBoxLayout* hBoxButtons = new QHBoxLayout;
@@ -123,8 +130,9 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 			m_button_ok->setFocus();
 		}
 
-		connect(m_button_ok, &QAbstractButton::clicked, [=]
+		connect(m_button_ok, &QAbstractButton::clicked, [this]()
 		{
+			g_last_user_response = CELL_MSGDIALOG_BUTTON_OK;
 			on_close(CELL_MSGDIALOG_BUTTON_OK);
 			m_dialog->accept();
 		});
@@ -132,15 +140,16 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 
 	m_dialog->setLayout(layout);
 
-	connect(m_dialog, &QDialog::rejected, [=]
+	connect(m_dialog, &QDialog::rejected, [this]()
 	{
 		if (!type.disable_cancel)
 		{
+			g_last_user_response = CELL_MSGDIALOG_BUTTON_ESCAPE;
 			on_close(CELL_MSGDIALOG_BUTTON_ESCAPE);
 		}
 	});
 
-	//Fix size
+	// Fix size
 	m_dialog->layout()->setSizeConstraint(QLayout::SetFixedSize);
 	m_dialog->show();
 
@@ -150,85 +159,16 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
 #endif
 }
 
-void msg_dialog_frame::CreateOsk(const std::string& msg, char16_t* osk_text, u32 charlimit)
+void msg_dialog_frame::Close(bool success)
 {
-	static const auto& lineEditWidth = []() {return QLabel("This is the very length of the lineedit due to hidpi reasons.").sizeHint().width(); };
-
-	if (m_osk_dialog)
+	if (m_dialog)
 	{
-		m_osk_dialog->close();
-		delete m_osk_dialog;
+		m_dialog->done(success ? QDialog::Accepted : QDialog::Rejected);
+		m_dialog->deleteLater();
 	}
-
-	m_osk_dialog = new custom_dialog(type.disable_cancel);
-	m_osk_dialog->setModal(true);
-	m_osk_text_return = osk_text;
-
-	//Title
-	m_osk_dialog->setWindowTitle(qstr(msg));
-
-	//Text Input
-	QLineEdit* input = new QLineEdit(m_osk_dialog);
-	input->setFixedWidth(lineEditWidth());
-	input->setMaxLength(charlimit);
-	input->setText(QString::fromStdU16String(std::u16string(m_osk_text_return)));
-	input->setFocus();
-
-	//Text Input Counter
-	QLabel* inputCount = new QLabel(QString("%1/%2").arg(input->text().length()).arg(charlimit));
-
-	//Ok Button
-	QPushButton* button_ok = new QPushButton("Ok", m_osk_dialog);
-
-	//Button Layout
-	QHBoxLayout* buttonsLayout = new QHBoxLayout;
-	buttonsLayout->setAlignment(Qt::AlignCenter);
-	buttonsLayout->addStretch();
-	buttonsLayout->addWidget(button_ok);
-	buttonsLayout->addStretch();
-
-	//Input Layout
-	QHBoxLayout* inputLayout = new QHBoxLayout;
-	inputLayout->setAlignment(Qt::AlignHCenter);
-	inputLayout->addWidget(input);
-	inputLayout->addWidget(inputCount);
-
-	QFormLayout* layout = new QFormLayout(m_osk_dialog);
-	layout->setFormAlignment(Qt::AlignHCenter);
-	layout->addRow(inputLayout);
-	layout->addRow(buttonsLayout);
-	m_osk_dialog->setLayout(layout);
-
-	//Events
-	connect(input, &QLineEdit::textChanged, [=](const QString& text)
-	{
-		inputCount->setText(QString("%1/%2").arg(text.length()).arg(charlimit));
-		on_osk_input_entered();
-	});
-
-	connect(input, &QLineEdit::returnPressed, m_osk_dialog, &QDialog::accept);
-	connect(button_ok, &QAbstractButton::clicked, m_osk_dialog, &QDialog::accept);
-
-	connect(m_osk_dialog, &QDialog::rejected, [=]
-	{
-		if (!type.disable_cancel)
-		{
-			on_close(CELL_MSGDIALOG_BUTTON_ESCAPE);
-		}
-	});
-
-	connect(m_osk_dialog, &QDialog::accepted, [=]
-	{
-		std::memcpy(m_osk_text_return, reinterpret_cast<const char16_t*>(input->text().constData()), ((input->text()).size() + 1) * sizeof(char16_t));
-		on_close(CELL_MSGDIALOG_BUTTON_OK);
-	});
-
-	//Fix size
-	m_osk_dialog->layout()->setSizeConstraint(QLayout::SetFixedSize);
-	m_osk_dialog->show();
 }
 
-msg_dialog_frame::msg_dialog_frame(QWindow* taskbarTarget) : m_taskbarTarget(taskbarTarget) {}
+msg_dialog_frame::msg_dialog_frame() {}
 
 msg_dialog_frame::~msg_dialog_frame()
 {
@@ -248,10 +188,6 @@ msg_dialog_frame::~msg_dialog_frame()
 	if (m_dialog)
 	{
 		m_dialog->deleteLater();
-	}
-	if (m_osk_dialog)
-	{
-		m_osk_dialog->deleteLater();
 	}
 }
 
@@ -289,7 +225,7 @@ void msg_dialog_frame::ProgressBarReset(u32 index)
 		m_gauge2->setValue(0);
 	}
 
-	if (index == taskbar_index)
+	if (index == taskbar_index + 0u)
 	{
 #ifdef _WIN32
 		if (m_tb_progress)
@@ -311,23 +247,23 @@ void msg_dialog_frame::ProgressBarInc(u32 index, u32 delta)
 
 	if (index == 0 && m_gauge1)
 	{
-		m_gauge1->setValue(std::min(m_gauge1->value() + (int)delta, m_gauge1->maximum()));
+		m_gauge1->setValue(std::min(m_gauge1->value() + static_cast<int>(delta), m_gauge1->maximum()));
 	}
 
 	if (index == 1 && m_gauge2)
 	{
-		m_gauge2->setValue(std::min(m_gauge2->value() + (int)delta, m_gauge2->maximum()));
+		m_gauge2->setValue(std::min(m_gauge2->value() + static_cast<int>(delta), m_gauge2->maximum()));
 	}
 
-	if (index == taskbar_index || taskbar_index == -1)
+	if (index == taskbar_index + 0u || taskbar_index == -1)
 	{
 #ifdef _WIN32
 		if (m_tb_progress)
 		{
-			m_tb_progress->setValue(std::min(m_tb_progress->value() + (int)delta, m_tb_progress->maximum()));
+			m_tb_progress->setValue(std::min(m_tb_progress->value() + static_cast<int>(delta), m_tb_progress->maximum()));
 		}
 #elif HAVE_QTDBUS
-		m_progress_value = std::min(m_progress_value + (int)delta, m_gauge_max);
+		m_progress_value = std::min(m_progress_value + static_cast<int>(delta), m_gauge_max);
 		UpdateProgress(m_progress_value);
 #endif
 	}
@@ -352,7 +288,7 @@ void msg_dialog_frame::ProgressBarSetLimit(u32 index, u32 limit)
 
 	bool set_taskbar_limit = false;
 
-	if (index == taskbar_index)
+	if (index == taskbar_index + 0u)
 	{
 		m_gauge_max = limit;
 		set_taskbar_limit = true;
@@ -385,8 +321,8 @@ void msg_dialog_frame::UpdateProgress(int progress, bool disable)
 		properties.insert(QStringLiteral("progress-visible"), false);
 	else
 		properties.insert(QStringLiteral("progress-visible"), true);
-	//Progress takes a value from 0.0 to 0.1
-	properties.insert(QStringLiteral("progress"), (double)progress/(double)m_gauge_max);
+	// Progress takes a value from 0.0 to 0.1
+	properties.insert(QStringLiteral("progress"), 1.* progress / m_gauge_max);
 	message << QStringLiteral("application://rpcs3.desktop") << properties;
 	QDBusConnection::sessionBus().send(message);
 }

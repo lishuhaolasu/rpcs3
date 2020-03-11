@@ -1,19 +1,62 @@
 #pragma once
 
+// Include asmjit with warnings ignored
 #define ASMJIT_EMBED
 #define ASMJIT_DEBUG
 
+#ifdef _MSC_VER
+#pragma warning(push, 0)
 #include <asmjit/asmjit.h>
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#include <asmjit/asmjit.h>
+#pragma GCC diagnostic pop
+#endif
+
 #include <array>
 #include <functional>
+
+enum class jit_class
+{
+	ppu_code,
+	ppu_data,
+	spu_code,
+	spu_data,
+};
+
+// ASMJIT runtime for emitting code in a single 2G region
+struct jit_runtime final : asmjit::HostRuntime
+{
+	jit_runtime();
+	~jit_runtime() override;
+
+	// Allocate executable memory
+	asmjit::Error _add(void** dst, asmjit::CodeHolder* code) noexcept override;
+
+	// Do nothing (deallocation is delayed)
+	asmjit::Error _release(void* p) noexcept override;
+
+	// Allocate memory
+	static u8* alloc(std::size_t size, uint align, bool exec = true) noexcept;
+
+	// Should be called at least once after global initialization
+	static void initialize();
+
+	// Deallocate all memory
+	static void finalize() noexcept;
+};
 
 namespace asmjit
 {
 	// Should only be used to build global functions
-	JitRuntime& get_global_runtime();
+	asmjit::JitRuntime& get_global_runtime();
 
 	// Emit xbegin and adjacent loop, return label at xbegin
-	Label build_transaction_enter(X86Assembler& c, Label fallback);
+	void build_transaction_enter(X86Assembler& c, Label fallback, const X86Gp& ctr, uint less_than);
 
 	// Emit xabort
 	void build_transaction_abort(X86Assembler& c, unsigned char code);
@@ -61,6 +104,7 @@ FT build_function_asm(F&& builder)
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "types.h"
@@ -69,12 +113,19 @@ FT build_function_asm(F&& builder)
 #include "restore_new.h"
 #ifdef _MSC_VER
 #pragma warning(push, 0)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wold-style-cast"
 #endif
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #ifdef _MSC_VER
 #pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
 #endif
 #include "define_new_memleakdetect.h"
 
@@ -97,7 +148,7 @@ class jit_compiler final
 	std::string m_cpu;
 
 public:
-	jit_compiler(const std::unordered_map<std::string, u64>& _link, const std::string& _cpu, bool large = false);
+	jit_compiler(const std::unordered_map<std::string, u64>& _link, const std::string& _cpu, u32 flags = 0);
 	~jit_compiler();
 
 	// Get LLVM context
@@ -110,9 +161,6 @@ public:
 	{
 		return *m_engine;
 	}
-
-	// Test SSSE3 feature
-	bool has_ssse3() const;
 
 	// Add module (path to obj cache dir)
 	void add(std::unique_ptr<llvm::Module> module, const std::string& path);
@@ -128,9 +176,6 @@ public:
 
 	// Get compiled function address
 	u64 get(const std::string& name);
-
-	// Add functions directly to the memory manager (name -> code)
-	static std::unordered_map<std::string, u64> add(std::unordered_map<std::string, std::string>);
 
 	// Get CPU info
 	static std::string cpu(const std::string& _cpu);

@@ -1,5 +1,5 @@
-#include "stdafx.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "Emu/VFS.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
 
@@ -9,7 +9,7 @@
 #include "Emu/Cell/lv2/sys_fs.h"
 #include "cellGifDec.h"
 
-logs::channel cellGifDec("cellGifDec");
+LOG_CHANNEL(cellGifDec);
 
 // cellGifDec aliases (only for cellGifDec.cpp)
 using PPMainHandle = vm::pptr<GifDecoder>;
@@ -66,7 +66,7 @@ s32 cellGifDecOpen(PMainHandle mainHandle, PPSubHandle subHandle, PSrc src, POpe
 	}
 	}
 
-	subHandle->set(vm::alloc(SIZE_32(GifStream), vm::main));
+	subHandle->set(vm::alloc(sizeof(GifStream), vm::main));
 
 	**subHandle = current_subHandle;
 
@@ -75,7 +75,8 @@ s32 cellGifDecOpen(PMainHandle mainHandle, PPSubHandle subHandle, PSrc src, POpe
 
 s32 cellGifDecExtOpen()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellGifDec.todo("cellGifDecExtOpen()");
+	return CELL_OK;
 }
 
 s32 cellGifDecReadHeader(PMainHandle mainHandle, PSubHandle subHandle, PInfo info)
@@ -85,7 +86,7 @@ s32 cellGifDecReadHeader(PMainHandle mainHandle, PSubHandle subHandle, PInfo inf
 	const u32& fd = subHandle->fd;
 	const u64& fileSize = subHandle->fileSize;
 	CellGifDecInfo& current_info = subHandle->info;
-	
+
 	// Write the header to buffer
 	u8 buffer[13];
 
@@ -104,8 +105,8 @@ s32 cellGifDecReadHeader(PMainHandle mainHandle, PSubHandle subHandle, PInfo inf
 	}
 	}
 
-	if (*(be_t<u32>*)buffer != 0x47494638 ||
-		(*(le_t<u16>*)(buffer + 4) != 0x6139 && *(le_t<u16>*)(buffer + 4) != 0x6137)) // Error: The first 6 bytes are not a valid GIF signature
+	if (*reinterpret_cast<be_t<u32>*>(buffer) != 0x47494638u ||
+		(*reinterpret_cast<le_t<u16>*>(buffer + 4) != 0x6139u && *reinterpret_cast<le_t<u16>*>(buffer + 4) != 0x6137u)) // Error: The first 6 bytes are not a valid GIF signature
 	{
 		return CELL_GIFDEC_ERROR_STREAM_FORMAT; // Surprisingly there is no error code related with headerss
 	}
@@ -121,13 +122,14 @@ s32 cellGifDecReadHeader(PMainHandle mainHandle, PSubHandle subHandle, PInfo inf
 	current_info.SPixelAspectRatio       = buffer[12];
 
 	*info = current_info;
-	
+
 	return CELL_OK;
 }
 
 s32 cellGifDecExtReadHeader()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellGifDec.todo("cellGifDecExtReadHeader()");
+	return CELL_OK;
 }
 
 s32 cellGifDecSetParameter(PMainHandle mainHandle, PSubHandle subHandle, PInParam inParam, POutParam outParam)
@@ -141,7 +143,7 @@ s32 cellGifDecSetParameter(PMainHandle mainHandle, PSubHandle subHandle, PInPara
 	current_outParam.outputWidth      = current_info.SWidth;
 	current_outParam.outputHeight     = current_info.SHeight;
 	current_outParam.outputColorSpace = inParam->colorSpace;
-	switch ((u32)current_outParam.outputColorSpace)
+	switch (current_outParam.outputColorSpace)
 	{
 	case CELL_GIFDEC_RGBA:
 	case CELL_GIFDEC_ARGB: current_outParam.outputComponents = 4; break;
@@ -157,7 +159,8 @@ s32 cellGifDecSetParameter(PMainHandle mainHandle, PSubHandle subHandle, PInPara
 
 s32 cellGifDecExtSetParameter()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellGifDec.todo("cellGifDecExtSetParameter()");
+	return CELL_OK;
 }
 
 s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u8> data, PDataCtrlParam dataCtrlParam, PDataOutInfo dataOutInfo)
@@ -166,9 +169,9 @@ s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u
 
 	dataOutInfo->status = CELL_GIFDEC_DEC_STATUS_STOP;
 
-	const u32& fd = subHandle->fd;
-	const u64& fileSize = subHandle->fileSize;
-	const CellGifDecOutParam& current_outParam = subHandle->outParam; 
+	const u32 fd = subHandle->fd;
+	const u64 fileSize = subHandle->fileSize;
+	const CellGifDecOutParam& current_outParam = subHandle->outParam;
 
 	//Copy the GIF file to a buffer
 	std::unique_ptr<u8[]> gif(new u8[fileSize]);
@@ -192,18 +195,18 @@ s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u
 	int width, height, actual_components;
 	auto image = std::unique_ptr<unsigned char,decltype(&::free)>
 		(
-			stbi_load_from_memory(gif.get(), (s32)fileSize, &width, &height, &actual_components, 4),
+			stbi_load_from_memory(gif.get(), ::narrow<int>(fileSize), &width, &height, &actual_components, 4),
 			&::free
 		);
 
 	if (!image)
 		return CELL_GIFDEC_ERROR_STREAM_FORMAT;
 
-	const int bytesPerLine = (u32)dataCtrlParam->outputBytesPerLine;
+	const int bytesPerLine = static_cast<int>(dataCtrlParam->outputBytesPerLine);
 	const char nComponents = 4;
 	uint image_size = width * height * nComponents;
 
-	switch((u32)current_outParam.outputColorSpace)
+	switch(current_outParam.outputColorSpace)
 	{
 	case CELL_GIFDEC_RGBA:
 	{
@@ -230,7 +233,7 @@ s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u
 		{
 			//TODO: find out if we can't do padding without an extra copy
 			const int linesize = std::min(bytesPerLine, width * nComponents);
-			char *output = (char *) malloc(linesize);
+			const auto output = std::make_unique<char[]>(linesize);
 			for (int i = 0; i < height; i++)
 			{
 				const int dstOffset = i * bytesPerLine;
@@ -242,24 +245,22 @@ s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u
 					output[j + 2] = image.get()[srcOffset + j + 1];
 					output[j + 3] = image.get()[srcOffset + j + 2];
 				}
-				memcpy(&data[dstOffset], output, linesize);
+				std::memcpy(&data[dstOffset], output.get(), linesize);
 			}
-			free(output);
 		}
 		else
 		{
-			uint* img = (uint*)new char[image_size];
-			uint* source_current = (uint*)&(image.get()[0]);
-			uint* dest_current = img;
-			for (uint i = 0; i < image_size / nComponents; i++) 
+			const auto img = std::make_unique<uint[]>(image_size);
+			uint* source_current = reinterpret_cast<uint*>(image.get());
+			uint* dest_current = img.get();
+			for (uint i = 0; i < image_size / nComponents; i++)
 			{
 				uint val = *source_current;
 				*dest_current = (val >> 24) | (val << 8); // set alpha (A8) as leftmost byte
 				source_current++;
 				dest_current++;
 			}
-			memcpy(data.get_ptr(), img, image_size); 
-			delete[] img;
+			std::memcpy(data.get_ptr(), img.get(), image_size);
 		}
 	}
 	break;
@@ -276,7 +277,8 @@ s32 cellGifDecDecodeData(PMainHandle mainHandle, PSubHandle subHandle, vm::ptr<u
 
 s32 cellGifDecExtDecodeData()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	cellGifDec.todo("cellGifDecExtDecodeData()");
+	return CELL_OK;
 }
 
 s32 cellGifDecClose(PMainHandle mainHandle, PSubHandle subHandle)
@@ -306,7 +308,7 @@ DECLARE(ppu_module_manager::cellGifDec)("cellGifDec", []()
 	REG_FUNC(cellGifDec, cellGifDecDecodeData);
 	REG_FUNC(cellGifDec, cellGifDecClose);
 	REG_FUNC(cellGifDec, cellGifDecDestroy);
-	
+
 	REG_FUNC(cellGifDec, cellGifDecExtOpen);
 	REG_FUNC(cellGifDec, cellGifDecExtReadHeader);
 	REG_FUNC(cellGifDec, cellGifDecExtSetParameter);

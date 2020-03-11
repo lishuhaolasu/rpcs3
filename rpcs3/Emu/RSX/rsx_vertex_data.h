@@ -1,8 +1,10 @@
-#pragma once
+﻿#pragma once
 
-#include "GCM.h"
+#include "gcm_enums.h"
+#include "rsx_decode.h"
+
 #include "Utilities/types.h"
-#include "Utilities/BEType.h"
+#include "rsx_utils.h"
 
 namespace rsx
 {
@@ -22,8 +24,8 @@ private:
 
 public:
 	data_array_format_info(int id, std::array<u32, 0x10000 / 4>& r)
-		   : registers(r)
-		   , index(id)
+		   : index(id)
+		   , registers(r)
 	{
 	}
 
@@ -51,11 +53,6 @@ public:
 	{
 		return decode_reg().type();
 	}
-
-	void reset()
-	{
-		registers[NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + index] = 0x2;
-	}
 };
 
 struct push_buffer_vertex_info
@@ -65,14 +62,17 @@ struct push_buffer_vertex_info
 
 	u32 vertex_count = 0;
 	u32 attribute_mask = ~0;
-	std::vector<u32> data;
+	rsx::simple_array<u32> data;
 
 	void clear()
 	{
-		data.resize(0);
-		attribute_mask = ~0;
-		vertex_count = 0;
-		size = 0;
+		if (size)
+		{
+			data.clear();
+			attribute_mask = ~0;
+			vertex_count = 0;
+			size = 0;
+		}
 	}
 
 	u8 get_vertex_size_in_dwords(vertex_base_type type)
@@ -91,7 +91,7 @@ struct push_buffer_vertex_info
 		case vertex_base_type::s32k:
 			return size / 2;
 		default:
-			fmt::throw_exception("Unsupported vertex base type %d", (u8)type);
+			fmt::throw_exception("Unsupported vertex base type %d", static_cast<u8>(type));
 		}
 	}
 
@@ -99,6 +99,8 @@ struct push_buffer_vertex_info
 	{
 		const u32 element_mask = (1 << sub_index);
 		const u8  vertex_size = get_vertex_size_in_dwords(type);
+
+		this->type = type;
 
 		if (attribute_mask & element_mask)
 		{
@@ -110,27 +112,8 @@ struct push_buffer_vertex_info
 
 		attribute_mask |= element_mask;
 
-		void* dst = data.data() + ((vertex_count - 1) * vertex_size) + sub_index;
-		
-		//NOTE: Endianness on wide types is converted to BE here because unified upload code assumes input in BE
-		//TODO: Implement fast LE source inputs and remove the byteswap
-		switch (type)
-		{
-		case vertex_base_type::f:
-			*(u32*)dst = se_storage<u32>::swap(arg);
-			break;
-		case vertex_base_type::ub:
-		case vertex_base_type::ub256:
-			*(u32*)dst = arg;
-			break;
-		case vertex_base_type::s1:
-		case vertex_base_type::s32k:
-			((u16*)dst)[0] = se_storage<u16>::swap((u16)(arg & 0xffff));
-			((u16*)dst)[1] = se_storage<u16>::swap((u16)(arg >> 16));
-			break;
-		default:
-			fmt::throw_exception("Unsupported vertex base type %d", (u8)type);
-		}
+		u32* dst = data.data() + ((vertex_count - 1) * vertex_size) + sub_index;
+		*dst = arg;
 	}
 };
 
@@ -141,9 +124,8 @@ struct register_vertex_data_info
 	u8 size = 0;
 	vertex_base_type type = vertex_base_type::f;
 
-	register_vertex_data_info() {}
+	register_vertex_data_info() = default;
 	std::array<u32, 4> data;
-
 };
 
 }

@@ -1,16 +1,21 @@
 #pragma once
 
-#include "vm_ref.h"
+#include "Utilities/types.h"
+#include "Utilities/BEType.h"
+#include "vm.h"
 
 class ppu_thread;
 
 namespace vm
 {
+	template <typename T, typename AT>
+	class _ref_base;
+
 	// SFINAE helper type for vm::_ptr_base comparison operators (enables comparison between equal types and between any type and void*)
 	template<typename T1, typename T2, typename RT = void>
 	using if_comparable_t = std::enable_if_t<std::is_void<T1>::value || std::is_void<T2>::value || std::is_same<std::remove_cv_t<T1>, std::remove_cv_t<T2>>::value, RT>;
 
-	template<typename T, typename AT = u32>
+	template <typename T, typename AT>
 	class _ptr_base
 	{
 		AT m_addr;
@@ -55,35 +60,35 @@ namespace vm
 
 		explicit operator bool() const
 		{
-			return m_addr != 0;
+			return m_addr != 0u;
 		}
 
 		// Get vm pointer to a struct member
 		template <typename MT, typename T2, typename = if_comparable_t<T, T2>>
-		_ptr_base<MT> ptr(MT T2::*const mptr) const
+		_ptr_base<MT, u32> ptr(MT T2::*const mptr) const
 		{
 			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr));
 		}
 
 		// Get vm pointer to a struct member with array subscription
 		template <typename MT, typename T2, typename ET = std::remove_extent_t<MT>, typename = if_comparable_t<T, T2>>
-		_ptr_base<ET> ptr(MT T2::*const mptr, u32 index) const
+		_ptr_base<ET, u32> ptr(MT T2::*const mptr, u32 index) const
 		{
-			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr) + SIZE_32(ET) * index);
+			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr) + u32{sizeof(ET)} * index);
 		}
 
 		// Get vm reference to a struct member
 		template <typename MT, typename T2, typename = if_comparable_t<T, T2>>
-		_ref_base<MT> ref(MT T2::*const mptr) const
+		_ref_base<MT, u32> ref(MT T2::*const mptr) const
 		{
 			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr));
 		}
 
 		// Get vm reference to a struct member with array subscription
 		template <typename MT, typename T2, typename ET = std::remove_extent_t<MT>, typename = if_comparable_t<T, T2>>
-		_ref_base<ET> ref(MT T2::*const mptr, u32 index) const
+		_ref_base<ET, u32> ref(MT T2::*const mptr, u32 index) const
 		{
-			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr) + SIZE_32(ET) * index);
+			return vm::cast(vm::cast(m_addr, HERE) + offset32(mptr) + u32{sizeof(ET)} * index);
 		}
 
 		// Get vm reference
@@ -109,37 +114,25 @@ namespace vm
 
 		std::add_lvalue_reference_t<T> operator [](u32 index) const
 		{
-			return *static_cast<T*>(vm::base(vm::cast(m_addr, HERE) + SIZE_32(T) * index));
+			return *static_cast<T*>(vm::base(vm::cast(m_addr, HERE) + u32{sizeof(T)} * index));
 		}
 
 		// Test address for arbitrary alignment: (addr & (align - 1)) == 0
-		bool aligned(u32 align) const
+		bool aligned(u32 align = alignof(T)) const
 		{
-			return (m_addr & (align - 1)) == 0;
-		}
-
-		// Test address alignment using alignof(T)
-		bool aligned() const
-		{
-			return aligned(ALIGN_32(T));
+			return (m_addr & (align - 1)) == 0u;
 		}
 
 		// Get type size
 		static constexpr u32 size()
 		{
-			return SIZE_32(T);
+			return sizeof(T);
 		}
 
 		// Get type alignment
 		static constexpr u32 align()
 		{
-			return ALIGN_32(T);
-		}
-
-		// Test address for arbitrary alignment: (addr & (align - 1)) != 0
-		explicit_bool_t operator %(u32 align) const
-		{
-			return !aligned(align);
+			return alignof(T);
 		}
 
 		_ptr_base<T, u32> operator +() const
@@ -149,62 +142,72 @@ namespace vm
 
 		_ptr_base<T, u32> operator +(u32 count) const
 		{
-			return vm::cast(vm::cast(m_addr, HERE) + count * SIZE_32(T));
+			return vm::cast(vm::cast(m_addr, HERE) + count * size());
 		}
 
 		_ptr_base<T, u32> operator -(u32 count) const
 		{
-			return vm::cast(vm::cast(m_addr, HERE) - count * SIZE_32(T));
+			return vm::cast(vm::cast(m_addr, HERE) - count * size());
 		}
 
 		friend _ptr_base<T, u32> operator +(u32 count, const _ptr_base& ptr)
 		{
-			return vm::cast(vm::cast(ptr.m_addr, HERE) + count * SIZE_32(T));
+			return vm::cast(vm::cast(ptr.m_addr, HERE) + count * size());
 		}
 
 		// Pointer difference operator
 		template<typename T2, typename AT2>
 		std::enable_if_t<std::is_object<T2>::value && std::is_same<std::decay_t<T>, std::decay_t<T2>>::value, s32> operator -(const _ptr_base<T2, AT2>& right) const
 		{
-			return static_cast<s32>(vm::cast(m_addr, HERE) - vm::cast(right.m_addr, HERE)) / SIZE_32(T);
+			return static_cast<s32>(vm::cast(m_addr, HERE) - vm::cast(right.m_addr, HERE)) / size();
 		}
 
 		_ptr_base operator ++(int)
 		{
 			_ptr_base result = *this;
-			m_addr = vm::cast(m_addr, HERE) + SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) + size();
 			return result;
 		}
 
 		_ptr_base& operator ++()
 		{
-			m_addr = vm::cast(m_addr, HERE) + SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) + size();
 			return *this;
 		}
 
 		_ptr_base operator --(int)
 		{
 			_ptr_base result = *this;
-			m_addr = vm::cast(m_addr, HERE) - SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) - size();
 			return result;
 		}
 
 		_ptr_base& operator --()
 		{
-			m_addr = vm::cast(m_addr, HERE) - SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) - size();
 			return *this;
 		}
 
 		_ptr_base& operator +=(s32 count)
 		{
-			m_addr = vm::cast(m_addr, HERE) + count * SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) + count * size();
 			return *this;
 		}
 
 		_ptr_base& operator -=(s32 count)
 		{
-			m_addr = vm::cast(m_addr, HERE) - count * SIZE_32(T);
+			m_addr = vm::cast(m_addr, HERE) - count * size();
 			return *this;
+		}
+
+		bool try_read(std::conditional_t<std::is_void_v<T>, char&, std::add_lvalue_reference_t<std::remove_const_t<T>>> out) const
+		{
+			return vm::try_access(vm::cast(m_addr, HERE), &out, sizeof(T), false);
+		}
+
+		bool try_write(std::conditional_t<std::is_void_v<T>, const char&, std::add_lvalue_reference_t<const T>> _in) const
+		{
+			return vm::try_access(vm::cast(m_addr, HERE), const_cast<T*>(&_in), sizeof(T), true);
 		}
 	};
 
@@ -249,7 +252,7 @@ namespace vm
 
 		explicit operator bool() const
 		{
-			return m_addr != 0;
+			return m_addr != 0u;
 		}
 
 		_ptr_base<RT(T...), u32> operator +() const
@@ -307,14 +310,14 @@ namespace vm
 
 		// Perform static_cast (for example, vm::ptr<void> to vm::ptr<char>)
 		template<typename CT, typename T, typename AT, typename = decltype(static_cast<to_be_t<CT>*>(std::declval<T*>()))>
-		inline _ptr_base<to_be_t<CT>> static_ptr_cast(const _ptr_base<T, AT>& other)
+		inline _ptr_base<to_be_t<CT>, u32> static_ptr_cast(const _ptr_base<T, AT>& other)
 		{
 			return vm::cast(other.addr(), HERE);
 		}
 
 		// Perform const_cast (for example, vm::cptr<char> to vm::ptr<char>)
 		template<typename CT, typename T, typename AT, typename = decltype(const_cast<to_be_t<CT>*>(std::declval<T*>()))>
-		inline _ptr_base<to_be_t<CT>> const_ptr_cast(const _ptr_base<T, AT>& other)
+		inline _ptr_base<to_be_t<CT>, u32> const_ptr_cast(const _ptr_base<T, AT>& other)
 		{
 			return vm::cast(other.addr(), HERE);
 		}
@@ -452,7 +455,7 @@ struct to_se<vm::_ptr_base<T, AT>, Se>
 template<typename T, typename AT>
 struct fmt_unveil<vm::_ptr_base<T, AT>, void>
 {
-	using type = vm::_ptr_base<T>; // Use only T, ignoring AT
+	using type = vm::_ptr_base<T, u32>; // Use only T, ignoring AT
 
 	static inline auto get(const vm::_ptr_base<T, AT>& arg)
 	{
@@ -460,26 +463,26 @@ struct fmt_unveil<vm::_ptr_base<T, AT>, void>
 	}
 };
 
-template<>
-struct fmt_class_string<vm::_ptr_base<const void>, void>
+template <>
+struct fmt_class_string<vm::_ptr_base<const void, u32>, void>
 {
 	static void format(std::string& out, u64 arg);
 };
 
-template<typename T>
-struct fmt_class_string<vm::_ptr_base<T>, void> : fmt_class_string<vm::_ptr_base<const void>, void>
+template <typename T>
+struct fmt_class_string<vm::_ptr_base<T, u32>, void> : fmt_class_string<vm::_ptr_base<const void, u32>, void>
 {
 	// Classify all pointers as const void*
 };
 
-template<>
-struct fmt_class_string<vm::_ptr_base<const char>, void>
+template <>
+struct fmt_class_string<vm::_ptr_base<const char, u32>, void>
 {
 	static void format(std::string& out, u64 arg);
 };
 
-template<>
-struct fmt_class_string<vm::_ptr_base<char>, void> : fmt_class_string<vm::_ptr_base<const char>>
+template <>
+struct fmt_class_string<vm::_ptr_base<char, u32>, void> : fmt_class_string<vm::_ptr_base<const char, u32>>
 {
 	// Classify char* as const char*
 };

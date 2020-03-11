@@ -1,17 +1,30 @@
-#include "stdafx.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/lv2/sys_sync.h"
 #include "Emu/Cell/lv2/sys_ppu_thread.h"
+#include "Emu/Cell/lv2/sys_process.h"
 #include "sysPrxForUser.h"
 
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wall"
+#pragma GCC diagnostic ignored "-Wextra"
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#endif
 extern "C"
 {
 #include "libavcodec/avcodec.h"
 #include "libavutil/imgutils.h"
 #include "libswscale/swscale.h"
 }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
 
 #include "cellPamf.h"
 #include "cellVdec.h"
@@ -19,22 +32,42 @@ extern "C"
 #include <mutex>
 #include <queue>
 #include <cmath>
+#include "Utilities/lockless.h"
+#include <variant>
 
 std::mutex g_mutex_avcodec_open2;
 
-logs::channel cellVdec("cellVdec");
+LOG_CHANNEL(cellVdec);
+
+template<>
+void fmt_class_string<CellVdecError>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](auto error)
+	{
+		switch (error)
+		{
+			STR_CASE(CELL_VDEC_ERROR_ARG);
+			STR_CASE(CELL_VDEC_ERROR_SEQ);
+			STR_CASE(CELL_VDEC_ERROR_BUSY);
+			STR_CASE(CELL_VDEC_ERROR_EMPTY);
+			STR_CASE(CELL_VDEC_ERROR_AU);
+			STR_CASE(CELL_VDEC_ERROR_PIC);
+			STR_CASE(CELL_VDEC_ERROR_FATAL);
+		}
+
+		return unknown;
+	});
+}
 
 vm::gvar<s32> _cell_vdec_prx_ver; // ???
 
-enum class vdec_cmd : u32
-{
-	null,
+constexpr struct vdec_start_seq_t{} vdec_start_seq{};
+constexpr struct vdec_close_t{} vdec_close{};
 
-	start_seq,
-	end_seq,
-	decode,
-	set_frc,
-	close,
+struct vdec_cmd
+{
+	s32 mode;
+	CellVdecAuInfo au;
 };
 
 struct vdec_frame
@@ -49,10 +82,11 @@ struct vdec_frame
 	};
 
 	std::unique_ptr<AVFrame, frame_dtor> avf;
-	u64 dts;
-	u64 pts;
-	u64 userdata;
-	u32 frc;
+	u64 dts{};
+	u64 pts{};
+	u64 userdata{};
+	u32 frc{};
+	bool PicItemRecieved = false;
 
 	AVFrame* operator ->() const
 	{
@@ -60,14 +94,19 @@ struct vdec_frame
 	}
 };
 
-struct vdec_thread : ppu_thread
+struct vdec_context final
 {
+	static const u32 id_base = 0xf0000000;
+	static const u32 id_step = 0x00000100;
+	static const u32 id_count = 1024;
+
 	AVCodec* codec{};
 	AVCodecContext* ctx{};
 	SwsContext* sws{};
 
-	const s32 type;
-	const u32 profile;
+	shared_mutex mutex; // Used for 'out' queue (TODO)
+
+	const u32 type;
 	const u32 mem_addr;
 	const u32 mem_size;
 	const vm::ptr<CellVdecCbMsg> cb_func;
@@ -77,24 +116,34 @@ struct vdec_thread : ppu_thread
 	u32 frc_set{}; // Frame Rate Override
 	u64 next_pts{};
 	u64 next_dts{};
-	u64 ppu_tid{};
+	u32 ppu_tid{};
 
-	std::mutex mutex;
-	std::queue<vdec_frame> out;
-	u32 max_frames = 60;
+	std::deque<vdec_frame> out;
+	atomic_t<u32> out_max = 60;
 
 	atomic_t<u32> au_count{0};
 
-	vdec_thread(s32 type, u32 profile, u32 addr, u32 size, vm::ptr<CellVdecCbMsg> func, u32 arg, u32 prio, u32 stack)
-		: ppu_thread("HLE Video Decoder", prio, stack)
-		, type(type)
-		, profile(profile)
+	lf_queue<std::variant<vdec_start_seq_t, vdec_close_t, vdec_cmd, CellVdecFrameRate>> in_cmd;
+
+	vdec_context(s32 type, u32 profile, u32 addr, u32 size, vm::ptr<CellVdecCbMsg> func, u32 arg)
+		: type(type)
 		, mem_addr(addr)
 		, mem_size(size)
 		, cb_func(func)
 		, cb_arg(arg)
 	{
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 		avcodec_register_all();
+#ifdef _MSC_VER
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
 
 		switch (type)
 		{
@@ -134,7 +183,7 @@ struct vdec_thread : ppu_thread
 		AVDictionary* opts{};
 		av_dict_set(&opts, "refcounted_frames", "1", 0);
 
-		std::lock_guard<std::mutex> lock(g_mutex_avcodec_open2);
+		std::lock_guard lock(g_mutex_avcodec_open2);
 
 		int err = avcodec_open2(ctx, codec, &opts);
 		if (err || opts)
@@ -144,67 +193,60 @@ struct vdec_thread : ppu_thread
 		}
 	}
 
-	virtual ~vdec_thread() override
+	~vdec_context()
 	{
 		avcodec_close(ctx);
 		avcodec_free_context(&ctx);
 		sws_freeContext(sws);
 	}
 
-	virtual std::string dump() const override
+	void exec(ppu_thread& ppu, u32 vid)
 	{
-		// TODO
-		return ppu_thread::dump();
-	}
+		ppu_tid = ppu.id;
 
-	virtual void cpu_task() override
-	{
-		while (cmd64 cmd = cmd_wait())
+		// pcmd can be nullptr
+		for (auto* pcmd : in_cmd)
 		{
-			switch (vdec_cmd vcmd = cmd.arg1<vdec_cmd>())
+			if (thread_ctrl::state() == thread_state::aborting)
 			{
-			case vdec_cmd::start_seq:
+				break;
+			}
+			else if (std::get_if<vdec_start_seq_t>(pcmd))
 			{
-				cmd_pop();
 				avcodec_flush_buffers(ctx);
 
 				frc_set = 0; // TODO: ???
 				next_pts = 0;
 				next_dts = 0;
 				cellVdec.trace("Start sequence...");
-				break;
 			}
-
-			case vdec_cmd::decode:
-			case vdec_cmd::end_seq:
+			else if (auto* cmd = std::get_if<vdec_cmd>(pcmd))
 			{
 				AVPacket packet{};
 				packet.pos = -1;
 
 				u64 au_usrd{};
 
-				if (vcmd == vdec_cmd::decode)
+				if (cmd->mode != -1)
 				{
-					const u32 au_mode = cmd.arg2<u32>();  // TODO
-					const u32 au_addr = cmd_get(1).arg1<u32>();
-					const u32 au_size = cmd_get(1).arg2<u32>();
-					const u64 au_pts = cmd_get(2).as<u64>();
-					const u64 au_dts = cmd_get(3).as<u64>();
-					au_usrd = cmd_get(4).as<u64>(); // TODO
-					const u64 au_spec = cmd_get(5).as<u64>(); // Unused
-					cmd_pop(5);
+					const u32 au_mode = cmd->mode;
+					const u32 au_addr = cmd->au.startAddr;
+					const u32 au_size = cmd->au.size;
+					const u64 au_pts = u64{cmd->au.pts.upper} << 32 | cmd->au.pts.lower;
+					const u64 au_dts = u64{cmd->au.dts.upper} << 32 | cmd->au.dts.lower;
+					au_usrd = cmd->au.userData;
 
 					packet.data = vm::_ptr<u8>(au_addr);
 					packet.size = au_size;
-					packet.pts = au_pts != -1 ? au_pts : AV_NOPTS_VALUE;
-					packet.dts = au_dts != -1 ? au_dts : AV_NOPTS_VALUE;
+					packet.pts = au_pts != umax ? au_pts : INT64_MIN;
+					packet.dts = au_dts != umax ? au_dts : INT64_MIN;
 
-					if (next_pts == 0 && au_pts != -1)
+					if (next_pts == 0 && au_pts != umax)
 					{
 						next_pts = au_pts;
 					}
 
-					if (next_dts == 0 && au_dts != -1)
+					if (next_dts == 0 && au_dts != umax)
 					{
 						next_dts = au_dts;
 					}
@@ -217,51 +259,50 @@ struct vdec_thread : ppu_thread
 				}
 				else
 				{
-					cmd_pop();
-
-					packet.pts = AV_NOPTS_VALUE;
-					packet.dts = AV_NOPTS_VALUE;
+					packet.pts = INT64_MIN;
+					packet.dts = INT64_MIN;
 					cellVdec.trace("End sequence...");
 				}
 
-				while (max_frames)
+				while (out_max)
 				{
-					if (vcmd == vdec_cmd::end_seq)
+					if (cmd->mode == -1)
 					{
 						break;
 					}
 
-					vdec_frame frame;
-					frame.avf.reset(av_frame_alloc());
-
-					if (!frame.avf)
-					{
-						fmt::throw_exception("av_frame_alloc() failed" HERE);
-					}
-
-					int got_picture = 0;
-
-					int decode = avcodec_decode_video2(ctx, frame.avf.get(), &got_picture, &packet);
-
-					if (decode < 0)
+					if (int ret = avcodec_send_packet(ctx, &packet); ret < 0)
 					{
 						char av_error[AV_ERROR_MAX_STRING_SIZE];
-						av_make_error_string(av_error, AV_ERROR_MAX_STRING_SIZE, decode);
-						fmt::throw_exception("AU decoding error(0x%x): %s" HERE, decode, av_error);
+						av_make_error_string(av_error, AV_ERROR_MAX_STRING_SIZE, ret);
+						fmt::throw_exception("AU queuing error(0x%x): %s" HERE, ret, av_error);
 					}
 
-					if (got_picture == 0)
+					while (true)
 					{
-						break;
-					}
+						// Keep receiving frames
+						vdec_frame frame;
+						frame.avf.reset(av_frame_alloc());
 
-					if (decode != packet.size)
-					{
-						cellVdec.error("Incorrect AU size (0x%x, decoded 0x%x)", packet.size, decode);
-					}
+						if (!frame.avf)
+						{
+							fmt::throw_exception("av_frame_alloc() failed" HERE);
+						}
 
-					if (got_picture)
-					{
+						if (int ret = avcodec_receive_frame(ctx, frame.avf.get()); ret < 0)
+						{
+							if (ret == AVERROR(EAGAIN))
+							{
+								break;
+							}
+							else
+							{
+								char av_error[AV_ERROR_MAX_STRING_SIZE];
+								av_make_error_string(av_error, AV_ERROR_MAX_STRING_SIZE, ret);
+								fmt::throw_exception("AU decoding error(0x%x): %s" HERE, ret, av_error);
+							}
+						}
+
 						if (frame->interlaced_frame)
 						{
 							// NPEB01838, NPUB31260
@@ -273,12 +314,12 @@ struct vdec_thread : ppu_thread
 							fmt::throw_exception("Repeated frames not supported (0x%x)", frame->repeat_pict);
 						}
 
-						if (frame->pkt_pts != AV_NOPTS_VALUE)
+						if (frame->pts != INT64_MIN)
 						{
-							next_pts = frame->pkt_pts;
+							next_pts = frame->pts;
 						}
 
-						if (frame->pkt_dts != AV_NOPTS_VALUE)
+						if (frame->pkt_dts != INT64_MIN)
 						{
 							next_dts = frame->pkt_dts;
 						}
@@ -321,10 +362,7 @@ struct vdec_thread : ppu_thread
 						}
 						else
 						{
-							const u64 amend = u64{90000} * ctx->time_base.num * ctx->ticks_per_frame / ctx->time_base.den;
-							next_pts += amend;
-							next_dts += amend;
-
+							u64 amend = u64{90000} * ctx->time_base.num * ctx->ticks_per_frame / ctx->time_base.den;
 							const auto freq = 1. * ctx->time_base.den / ctx->time_base.num / ctx->ticks_per_frame;
 
 							if (std::abs(freq - 23.976) < 0.002)
@@ -344,241 +382,410 @@ struct vdec_thread : ppu_thread
 							else if (std::abs(freq - 60.000) < 0.001)
 								frame.frc = CELL_VDEC_FRC_60;
 							else
-								fmt::throw_exception("Unsupported time_base.num (%d/%d, tpf=%d)" HERE, ctx->time_base.den, ctx->time_base.num, ctx->ticks_per_frame);
+							{
+								// Hack
+								cellVdec.error("Unsupported time_base.num (%d/%d, tpf=%d)", ctx->time_base.den, ctx->time_base.num, ctx->ticks_per_frame);
+								amend = u64{90000} / 30;
+								frame.frc = CELL_VDEC_FRC_30;
+							}
+
+							next_pts += amend;
+							next_dts += amend;
 						}
 
-						cellVdec.trace("Got picture (pts=0x%llx[0x%llx], dts=0x%llx[0x%llx])", frame.pts, frame->pkt_pts, frame.dts, frame->pkt_dts);
+						cellVdec.trace("Got picture (pts=0x%llx[0x%llx], dts=0x%llx[0x%llx])", frame.pts, frame->pts, frame.dts, frame->pkt_dts);
 
-						std::lock_guard<std::mutex>{mutex}, out.push(std::move(frame));
+						std::lock_guard{mutex}, out.push_back(std::move(frame));
 
-						cb_func(*this, id, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK, cb_arg);
-						lv2_obj::sleep(*this);
+						cb_func(ppu, vid, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK, cb_arg);
+						lv2_obj::sleep(ppu);
 					}
 
-					if (vcmd == vdec_cmd::decode)
+					if (cmd->mode != -1)
 					{
 						break;
 					}
 				}
 
-				if (max_frames)
+				if (out_max)
 				{
-					cb_func(*this, id, vcmd == vdec_cmd::decode ? CELL_VDEC_MSG_TYPE_AUDONE : CELL_VDEC_MSG_TYPE_SEQDONE, CELL_OK, cb_arg);
-					lv2_obj::sleep(*this);
+					cb_func(ppu, vid, cmd->mode != -1 ? CELL_VDEC_MSG_TYPE_AUDONE : CELL_VDEC_MSG_TYPE_SEQDONE, CELL_OK, cb_arg);
+					lv2_obj::sleep(ppu);
 				}
 
-				if (vcmd == vdec_cmd::decode)
+				if (cmd->mode != -1)
 				{
 					au_count--;
 				}
 
-				while (std::lock_guard<std::mutex>{mutex}, max_frames && out.size() > max_frames)
+				while (thread_ctrl::state() != thread_state::aborting && out_max && (std::lock_guard{mutex}, out.size() > out_max))
 				{
-					thread_ctrl::wait();
+					thread_ctrl::wait_for(1000);
 				}
-
+			}
+			else if (auto* frc = std::get_if<CellVdecFrameRate>(pcmd))
+			{
+				frc_set = *frc;
+			}
+			else if (std::get_if<vdec_close_t>(pcmd))
+			{
 				break;
-			}
-
-			case vdec_cmd::set_frc:
-			{
-				cmd_pop();
-				frc_set = cmd.arg2<u32>();
-				break;
-			}
-
-			case vdec_cmd::close:
-			{
-				cmd_pop();
-				state += cpu_flag::exit;
-				return;
-			}
-
-			default:
-			{
-				fmt::throw_exception("Unknown command (0x%x)" HERE, (u32)vcmd);
-			}
 			}
 		}
 	}
 };
 
-u32 vdecQueryAttr(s32 type, u32 profile, u32 spec_addr /* may be 0 */, vm::ptr<CellVdecAttr> attr)
+static void vdecEntry(ppu_thread& ppu, u32 vid)
 {
-	switch (type) // TODO: check profile levels
+	idm::get<vdec_context>(vid)->exec(ppu, vid);
+
+	ppu.state += cpu_flag::exit;
+}
+
+static error_code vdecQueryAttr(s32 type, u32 profile, u32 spec_addr /* may be 0 */, CellVdecAttr* attr)
+{
+	// Write 0 at start
+	attr->memSize = 0;
+
+	u32 decoderVerLower;
+	u32 memSize = 0;
+
+	const bool new_sdk = g_ps3_process_info.sdk_ver > 0x20FFFF;
+
+	switch (type)
 	{
-	case CELL_VDEC_CODEC_TYPE_AVC: cellVdec.warning("cellVdecQueryAttr: AVC (profile=%d)", profile); break;
-	case CELL_VDEC_CODEC_TYPE_MPEG2: cellVdec.warning("cellVdecQueryAttr: MPEG2 (profile=%d)", profile); break;
-	case CELL_VDEC_CODEC_TYPE_DIVX: cellVdec.warning("cellVdecQueryAttr: DivX (profile=%d)", profile); break;
+	case CELL_VDEC_CODEC_TYPE_AVC:
+	{
+		cellVdec.warning("cellVdecQueryAttr: AVC (profile=%d)", profile);
+
+		const vm::ptr<CellVdecAvcSpecificInfo> sinfo = vm::cast(spec_addr);
+
+		// TODO: sinfo
+
+		switch (profile)
+		{
+		case CELL_VDEC_AVC_LEVEL_1P0: memSize = new_sdk ? 0x70167D  : 0xA014FD ; break;
+		case CELL_VDEC_AVC_LEVEL_1P1: memSize = new_sdk ? 0x86CB7D  : 0xB6C9FD ; break;
+		case CELL_VDEC_AVC_LEVEL_1P2: memSize = new_sdk ? 0x9E307D  : 0xCE2D7D ; break;
+		case CELL_VDEC_AVC_LEVEL_1P3: memSize = new_sdk ? 0xA057FD  : 0xD054FD ; break;
+		case CELL_VDEC_AVC_LEVEL_2P0: memSize = new_sdk ? 0xA057FD  : 0xD054FD ; break;
+		case CELL_VDEC_AVC_LEVEL_2P1: memSize = new_sdk ? 0xE90DFD  : 0x1190AFD; break;
+		case CELL_VDEC_AVC_LEVEL_2P2: memSize = new_sdk ? 0x14E49FD : 0x17E46FD; break;
+		case CELL_VDEC_AVC_LEVEL_3P0: memSize = new_sdk ? 0x155B5FD : 0x185B17D; break;
+		case CELL_VDEC_AVC_LEVEL_3P1: memSize = new_sdk ? 0x1CD327D : 0x1FD2AFD; break;
+		case CELL_VDEC_AVC_LEVEL_3P2: memSize = new_sdk ? 0x2397B7D : 0x2696F7D; break;
+		case CELL_VDEC_AVC_LEVEL_4P0: memSize = new_sdk ? 0x33A5FFD : 0x36A527D; break;
+		case CELL_VDEC_AVC_LEVEL_4P1: memSize = new_sdk ? 0x33A5FFD : 0x36A527D; break;
+		case CELL_VDEC_AVC_LEVEL_4P2: memSize = new_sdk ? 0x33A5FFD : 0x36A527D; break;
+		default: return CELL_VDEC_ERROR_ARG;
+		}
+
+		decoderVerLower = 0x11300;
+		break;
+	}
+	case CELL_VDEC_CODEC_TYPE_MPEG2:
+	{
+		cellVdec.warning("cellVdecQueryAttr: MPEG2 (profile=%d)", profile);
+
+		const vm::ptr<CellVdecMpeg2SpecificInfo> sinfo = vm::cast(spec_addr);
+
+		if (sinfo)
+		{
+			if (sinfo->thisSize != sizeof(CellVdecMpeg2SpecificInfo))
+			{
+				return CELL_VDEC_ERROR_ARG;
+			}
+		}
+
+		// TODO: sinfo
+
+		const u32 maxDecH = sinfo ? +sinfo->maxDecodedFrameHeight : 0;
+		const u32 maxDecW = sinfo ? +sinfo->maxDecodedFrameWidth : 0;
+
+		switch (profile)
+		{
+		case CELL_VDEC_MPEG2_MP_LL:
+		{
+			if (maxDecW > 352 || maxDecH > 288)
+			{
+				return CELL_VDEC_ERROR_ARG;
+			}
+
+			memSize = new_sdk ? 0x11290B : 0x2A610B;
+			break;
+		}
+		case CELL_VDEC_MPEG2_MP_ML:
+		{
+			if (maxDecW > 720 || maxDecH > 576)
+			{
+				return CELL_VDEC_ERROR_ARG;
+			}
+
+			memSize = new_sdk ? 0x2DFB8B : 0x47110B;
+			break;
+		}
+		case CELL_VDEC_MPEG2_MP_H14:
+		{
+			if (maxDecW > 1440 || maxDecH > 1152)
+			{
+				return CELL_VDEC_ERROR_ARG;
+			}
+
+			memSize = new_sdk ? 0xA0270B : 0xB8F90B;
+			break;
+		}
+		case CELL_VDEC_MPEG2_MP_HL:
+		{
+			if (maxDecW > 1920 || maxDecH > 1152)
+			{
+				return CELL_VDEC_ERROR_ARG;
+			}
+
+			memSize = new_sdk ? 0xD2F40B : 0xEB990B;
+			break;
+		}
+		default: return CELL_VDEC_ERROR_ARG;
+		}
+
+		decoderVerLower = 0x1030000;
+		break;
+	}
+	case CELL_VDEC_CODEC_TYPE_DIVX:
+	{
+		cellVdec.warning("cellVdecQueryAttr: DivX (profile=%d)", profile);
+
+		const vm::ptr<CellVdecDivxSpecificInfo2> sinfo = vm::cast(spec_addr);
+
+		// TODO: sinfo
+
+		switch (profile)
+		{
+		case CELL_VDEC_DIVX_QMOBILE     : memSize = new_sdk ? 0x11B720 : 0x1DEF30; break;
+		case CELL_VDEC_DIVX_MOBILE      : memSize = new_sdk ? 0x19A740 : 0x26DED0; break;
+		case CELL_VDEC_DIVX_HOME_THEATER: memSize = new_sdk ? 0x386A60 : 0x498060; break;
+		case CELL_VDEC_DIVX_HD_720      : memSize = new_sdk ? 0x692070 : 0x805690; break;
+		case CELL_VDEC_DIVX_HD_1080     : memSize = new_sdk ? 0xD78100 : 0xFC9870; break;
+		default: return CELL_VDEC_ERROR_ARG;
+		}
+
+		decoderVerLower = 0x30806;
+		break;
+	}
 	default: return CELL_VDEC_ERROR_ARG;
 	}
 
-	// TODO: check values
-	attr->decoderVerLower = 0x280000; // from dmux
-	attr->decoderVerUpper = 0x260000;
-	attr->memSize = 4 * 1024 * 1024; // 4 MB
+	attr->decoderVerLower = decoderVerLower;
+	attr->decoderVerUpper = 0x4840010;
+	attr->memSize = !spec_addr ? verify(HERE, memSize) : 4 * 1024 * 1024;
 	attr->cmdDepth = 4;
 	return CELL_OK;
 }
 
-s32 cellVdecQueryAttr(vm::cptr<CellVdecType> type, vm::ptr<CellVdecAttr> attr)
+error_code cellVdecQueryAttr(vm::cptr<CellVdecType> type, vm::ptr<CellVdecAttr> attr)
 {
 	cellVdec.warning("cellVdecQueryAttr(type=*0x%x, attr=*0x%x)", type, attr);
 
-	return vdecQueryAttr(type->codecType, type->profileLevel, 0, attr);
+	if (!type || !attr)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	return vdecQueryAttr(type->codecType, type->profileLevel, 0, attr.get_ptr());
 }
 
-s32 cellVdecQueryAttrEx(vm::cptr<CellVdecTypeEx> type, vm::ptr<CellVdecAttr> attr)
+error_code cellVdecQueryAttrEx(vm::cptr<CellVdecTypeEx> type, vm::ptr<CellVdecAttr> attr)
 {
 	cellVdec.warning("cellVdecQueryAttrEx(type=*0x%x, attr=*0x%x)", type, attr);
 
-	return vdecQueryAttr(type->codecType, type->profileLevel, type->codecSpecificInfo_addr, attr);
+	if (!type || !attr)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	return vdecQueryAttr(type->codecType, type->profileLevel, type->codecSpecificInfo_addr, attr.get_ptr());
 }
 
-s32 cellVdecOpen(ppu_thread& ppu, vm::cptr<CellVdecType> type, vm::cptr<CellVdecResource> res, vm::cptr<CellVdecCb> cb, vm::ptr<u32> handle)
+template <typename T, typename U>
+static error_code vdecOpen(ppu_thread& ppu, T type, U res, vm::cptr<CellVdecCb> cb, vm::ptr<u32> handle)
+{
+	if (!type || !res || !cb || !handle)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	if (res->ppuThreadPriority + 0u > 3071 || res->spuThreadPriority + 0u > 255 || res->ppuThreadStackSize < 4096
+		|| type->codecType + 0u > 0xd)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	u32 spec_addr = 0;
+
+	if constexpr (std::is_same_v<std::decay_t<typename T::type>, CellVdecTypeEx>)
+	{
+		spec_addr = type->codecSpecificInfo_addr;
+	}
+
+	if (CellVdecAttr attr{};
+		vdecQueryAttr(type->codecType, type->profileLevel, spec_addr, &attr) != CELL_OK ||
+		attr.memSize > res->memSize)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	// Create decoder context
+	const u32 vid = idm::make<vdec_context>(type->codecType, type->profileLevel, res->memAddr, res->memSize, cb->cbFunc, cb->cbArg);
+
+	// Run thread
+	vm::var<u64> _tid;
+	vm::var<char[]> _name = vm::make_str("HLE Video Decoder");
+	ppu_execute<&sys_ppu_thread_create>(ppu, +_tid, 0x10000, vid, +res->ppuThreadPriority, +res->ppuThreadStackSize, SYS_PPU_THREAD_CREATE_INTERRUPT, +_name);
+	*handle = vid;
+
+	const auto thrd = idm::get<named_thread<ppu_thread>>(static_cast<u32>(*_tid));
+
+	thrd->cmd_list
+	({
+		{ ppu_cmd::set_args, 1 }, u64{vid},
+		{ ppu_cmd::hle_call, FIND_FUNC(vdecEntry) },
+	});
+
+	thrd->state -= cpu_flag::stop;
+	thread_ctrl::notify(*thrd);
+
+	return CELL_OK;
+}
+
+error_code cellVdecOpen(ppu_thread& ppu, vm::cptr<CellVdecType> type, vm::cptr<CellVdecResource> res, vm::cptr<CellVdecCb> cb, vm::ptr<u32> handle)
 {
 	cellVdec.warning("cellVdecOpen(type=*0x%x, res=*0x%x, cb=*0x%x, handle=*0x%x)", type, res, cb, handle);
 
-	// Create decoder thread
-	auto&& vdec = idm::make_ptr<ppu_thread, vdec_thread>(type->codecType, type->profileLevel, res->memAddr, res->memSize, cb->cbFunc, cb->cbArg, res->ppuThreadPriority, res->ppuThreadStackSize);
-
-	// Hack: store thread id (normally it should be pointer)
-	*handle = vdec->id;
-
-	vm::var<u64> _tid;
-	CALL_FUNC(ppu, sys_ppu_thread_create, ppu, +_tid, 1148, 0, 900, 0x4000, SYS_PPU_THREAD_CREATE_INTERRUPT, vm::null);
-	vdec->gpr[13] = idm::get<ppu_thread>(*_tid)->gpr[13];
-	vdec->ppu_tid = *_tid;
-
-	vdec->run();
-
-	return CELL_OK;
+	return vdecOpen(ppu, type, res, cb, handle);
 }
 
-s32 cellVdecOpenEx(ppu_thread& ppu, vm::cptr<CellVdecTypeEx> type, vm::cptr<CellVdecResourceEx> res, vm::cptr<CellVdecCb> cb, vm::ptr<u32> handle)
+error_code cellVdecOpenEx(ppu_thread& ppu, vm::cptr<CellVdecTypeEx> type, vm::cptr<CellVdecResourceEx> res, vm::cptr<CellVdecCb> cb, vm::ptr<u32> handle)
 {
 	cellVdec.warning("cellVdecOpenEx(type=*0x%x, res=*0x%x, cb=*0x%x, handle=*0x%x)", type, res, cb, handle);
 
-	// Create decoder thread
-	auto&& vdec = idm::make_ptr<ppu_thread, vdec_thread>(type->codecType, type->profileLevel, res->memAddr, res->memSize, cb->cbFunc, cb->cbArg, res->ppuThreadPriority, res->ppuThreadStackSize);
-
-	// Hack: store thread id (normally it should be pointer)
-	*handle = vdec->id;
-
-	vm::var<u64> _tid;
-	CALL_FUNC(ppu, sys_ppu_thread_create, ppu, +_tid, 1148, 0, 900, 0x4000, SYS_PPU_THREAD_CREATE_INTERRUPT, vm::null);
-	vdec->gpr[13] = idm::get<ppu_thread>(*_tid)->gpr[13];
-	vdec->ppu_tid = *_tid;
-
-	vdec->run();
-
-	return CELL_OK;
+	return vdecOpen(ppu, type, res, cb, handle);
 }
 
-s32 cellVdecClose(ppu_thread& ppu, u32 handle)
+error_code cellVdecClose(ppu_thread& ppu, u32 handle)
 {
 	cellVdec.warning("cellVdecClose(handle=0x%x)", handle);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
 	if (!vdec)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	lv2_obj::sleep(ppu);
+	// TODO: return CELL_VDEC_ERROR_SEQ
 
+	lv2_obj::sleep(ppu);
+	vdec->out_max = 0;
+	vdec->in_cmd.push(vdec_close);
+
+	while (!atomic_storage<u32>::load(vdec->ppu_tid))
 	{
-		std::lock_guard<std::mutex> lock(vdec->mutex);
-		vdec->cmd_push({vdec_cmd::close, 0});
-		vdec->max_frames = 0;
+		thread_ctrl::wait_for(1000);
 	}
 
-	vdec->notify();
-	vdec->join();
-	idm::remove<ppu_thread>(handle);
-
-	CALL_FUNC(ppu, sys_interrupt_thread_disestablish, ppu, vdec->ppu_tid);
+	ppu_execute<&sys_interrupt_thread_disestablish>(ppu, vdec->ppu_tid);
+	idm::remove<vdec_context>(handle);
 	return CELL_OK;
 }
 
-s32 cellVdecStartSeq(u32 handle)
+error_code cellVdecStartSeq(u32 handle)
 {
 	cellVdec.trace("cellVdecStartSeq(handle=0x%x)", handle);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
 	if (!vdec)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	vdec->cmd_push({vdec_cmd::start_seq, 0});
-	vdec->notify();
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
+	vdec->in_cmd.push(vdec_start_seq);
 	return CELL_OK;
 }
 
-s32 cellVdecEndSeq(u32 handle)
+error_code cellVdecEndSeq(u32 handle)
 {
 	cellVdec.warning("cellVdecEndSeq(handle=0x%x)", handle);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
 	if (!vdec)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	vdec->cmd_push({vdec_cmd::end_seq, 0});
-	vdec->notify();
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
+	vdec->in_cmd.push(vdec_cmd{-1});
 	return CELL_OK;
 }
 
-s32 cellVdecDecodeAu(u32 handle, CellVdecDecodeMode mode, vm::cptr<CellVdecAuInfo> auInfo)
+error_code cellVdecDecodeAu(u32 handle, CellVdecDecodeMode mode, vm::cptr<CellVdecAuInfo> auInfo)
 {
-	cellVdec.trace("cellVdecDecodeAu(handle=0x%x, mode=%d, auInfo=*0x%x)", handle, (s32)mode, auInfo);
+	cellVdec.trace("cellVdecDecodeAu(handle=0x%x, mode=%d, auInfo=*0x%x)", handle, +mode, auInfo);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
-	if (mode > CELL_VDEC_DEC_MODE_PB_SKIP || !vdec)
+	if (!auInfo || !vdec || mode < 0 || mode > CELL_VDEC_DEC_MODE_PB_SKIP)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	if (vdec->au_count.fetch_op([](u32& c) { if (c < 4) c++; }) >= 4)
+	if (!vdec->au_count.try_inc(4))
 	{
 		return CELL_VDEC_ERROR_BUSY;
 	}
 
 	// TODO: check info
-	vdec->cmd_list
-	({
-		{ vdec_cmd::decode, mode },
-		{ auInfo->startAddr, auInfo->size },
-		u64{auInfo->pts.upper} << 32 | auInfo->pts.lower,
-		u64{auInfo->dts.upper} << 32 | auInfo->dts.lower,
-		auInfo->userData,
-		auInfo->codecSpecificData,
-	});
-
-	vdec->notify();
+	vdec->in_cmd.push(vdec_cmd{mode, *auInfo});
 	return CELL_OK;
 }
 
-s32 cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u8> outBuff)
+error_code cellVdecDecodeAuEx2()
+{
+	UNIMPLEMENTED_FUNC(cellVdec);
+	return CELL_OK;
+}
+
+error_code cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u8> outBuff)
 {
 	cellVdec.trace("cellVdecGetPicture(handle=0x%x, format=*0x%x, outBuff=*0x%x)", handle, format, outBuff);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
-	if (!format || !vdec)
+	if (!vdec || !format)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	vdec_frame frame;
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
+	if (format->formatType > 4 || (format->formatType <= CELL_VDEC_PICFMT_RGBA32_ILV && format->colorMatrixType > CELL_VDEC_COLOR_MATRIX_TYPE_BT709))
 	{
-		std::lock_guard<std::mutex> lock(vdec->mutex);
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	// TODO: something like this is checked here, maybe only if outBuff[0] != 0
+	//if (outBuff && outBuff[0] != 8 && outBuff[0] != 12)
+	//{
+	//	return CELL_VDEC_ERROR_ARG;
+	//}
+
+	vdec_frame frame;
+	bool notify = false;
+	{
+		std::lock_guard lock(vdec->mutex);
 
 		if (vdec->out.empty())
 		{
@@ -587,15 +794,16 @@ s32 cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u
 
 		frame = std::move(vdec->out.front());
 
-		vdec->out.pop();
-
-		if (vdec->out.size() <= vdec->max_frames)
-		{
-			vdec->notify();
-		}
+		vdec->out.pop_front();
+		if (vdec->out.size() + 1 == vdec->out_max)
+			notify = true;
 	}
 
-	vdec->notify();
+	if (notify)
+	{
+		auto vdec_ppu = idm::get<named_thread<ppu_thread>>(vdec->ppu_tid);
+		if (vdec_ppu) thread_ctrl::notify(*vdec_ppu);
+	}
 
 	if (outBuff)
 	{
@@ -620,10 +828,6 @@ s32 cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u
 		}
 
 		// TODO: color matrix
-		if (format->colorMatrixType & ~1)
-		{
-			fmt::throw_exception("Unknown colorMatrixType (%d)" HERE, format->colorMatrixType);
-		}
 
 		if (alpha_plane)
 		{
@@ -634,8 +838,11 @@ s32 cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u
 
 		switch (frame->format)
 		{
-		case AV_PIX_FMT_YUV420P: in_f = alpha_plane ? AV_PIX_FMT_YUVA420P : AV_PIX_FMT_YUV420P; break;
-
+		case AV_PIX_FMT_YUVJ420P:
+			cellVdec.error("cellVdecGetPicture(): experimental AVPixelFormat (%d). This may cause suboptimal video quality.", frame->format);
+		case AV_PIX_FMT_YUV420P:
+			in_f = alpha_plane ? AV_PIX_FMT_YUVA420P : static_cast<AVPixelFormat>(frame->format);
+			break;
 		default:
 		{
 			fmt::throw_exception("Unknown format (%d)" HERE, frame->format);
@@ -674,7 +881,7 @@ s32 cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm::ptr<u
 	return CELL_OK;
 }
 
-s32 cellVdecGetPictureExt(u32 handle, vm::cptr<CellVdecPicFormat2> format2, vm::ptr<u8> outBuff, u32 arg4)
+error_code cellVdecGetPictureExt(u32 handle, vm::cptr<CellVdecPicFormat2> format2, vm::ptr<u8> outBuff, u32 arg4)
 {
 	cellVdec.warning("cellVdecGetPictureExt(handle=0x%x, format2=*0x%x, outBuff=*0x%x, arg4=*0x%x)", handle, format2, outBuff, arg4);
 
@@ -691,66 +898,91 @@ s32 cellVdecGetPictureExt(u32 handle, vm::cptr<CellVdecPicFormat2> format2, vm::
 	return cellVdecGetPicture(handle, format, outBuff);
 }
 
-s32 cellVdecGetPicItem(u32 handle, vm::pptr<CellVdecPicItem> picItem)
+error_code cellVdecGetPicItem(u32 handle, vm::pptr<CellVdecPicItem> picItem)
 {
 	cellVdec.trace("cellVdecGetPicItem(handle=0x%x, picItem=**0x%x)", handle, picItem);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
-	if (!vdec)
+	if (!vdec || !picItem)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
+
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
+	struct all_info_t
+	{
+		CellVdecPicItem picItem;
+		std::aligned_union_t<0, CellVdecAvcInfo, CellVdecDivxInfo, CellVdecMpeg2Info> picInfo;
+	};
 
 	AVFrame* frame{};
 	u64 pts;
 	u64 dts;
 	u64 usrd;
 	u32 frc;
+	vm::ptr<CellVdecPicItem> info;
 	{
-		std::lock_guard<std::mutex> lock(vdec->mutex);
+		std::lock_guard lock(vdec->mutex);
 
-		if (vdec->out.empty())
+		for (auto& picture : vdec->out)
 		{
-			return CELL_VDEC_ERROR_EMPTY;
-		}
+			if (!picture.PicItemRecieved)
+			{
+				picture.PicItemRecieved = true;
+				frame = picture.avf.get();
+				pts = picture.pts;
+				dts = picture.dts;
+				usrd = picture.userdata;
+				frc = picture.frc;
+				info.set(vdec->mem_addr + vdec->mem_bias);
 
-		frame = vdec->out.front().avf.get();
-		pts = vdec->out.front().pts;
-		dts = vdec->out.front().dts;
-		usrd = vdec->out.front().userdata;
-		frc = vdec->out.front().frc;
+				constexpr u64 size_needed = sizeof(all_info_t);
+
+				if (vdec->mem_bias + size_needed >= vdec->mem_size / size_needed * size_needed)
+				{
+					vdec->mem_bias = 0;
+					break;
+				}
+
+				vdec->mem_bias += size_needed;
+				break;
+			}
+		}
 	}
 
-	const vm::ptr<CellVdecPicItem> info = vm::cast(vdec->mem_addr + vdec->mem_bias);
-
-	vdec->mem_bias += 512;
-	if (vdec->mem_bias + 512 > vdec->mem_size)
+	if (!frame)
 	{
-		vdec->mem_bias = 0;
+		// If frame is empty info was not found
+		return CELL_VDEC_ERROR_EMPTY;
 	}
 
 	info->codecType = vdec->type;
 	info->startAddr = 0x00000123; // invalid value (no address for picture)
-	info->size = align(av_image_get_buffer_size(vdec->ctx->pix_fmt, vdec->ctx->width, vdec->ctx->height, 1), 128);
+	const int buffer_size = av_image_get_buffer_size(vdec->ctx->pix_fmt, vdec->ctx->width, vdec->ctx->height, 1);
+	verify(HERE), (buffer_size >= 0);
+	info->size = align<u32>(buffer_size, 128);
 	info->auNum = 1;
-	info->auPts[0].lower = (u32)(pts);
-	info->auPts[0].upper = (u32)(pts >> 32);
-	info->auPts[1].lower = (u32)CODEC_TS_INVALID;
-	info->auPts[1].upper = (u32)CODEC_TS_INVALID;
-	info->auDts[0].lower = (u32)(dts);
-	info->auDts[0].upper = (u32)(dts >> 32);
-	info->auDts[1].lower = (u32)CODEC_TS_INVALID;
-	info->auDts[1].upper = (u32)CODEC_TS_INVALID;
+	info->auPts[0].lower = static_cast<u32>(pts);
+	info->auPts[0].upper = static_cast<u32>(pts >> 32);
+	info->auPts[1].lower = -1;
+	info->auPts[1].upper = -1;
+	info->auDts[0].lower = static_cast<u32>(dts);
+	info->auDts[0].upper = static_cast<u32>(dts >> 32);
+	info->auDts[1].lower = -1;
+	info->auDts[1].upper = -1;
 	info->auUserData[0] = usrd;
 	info->auUserData[1] = 0;
 	info->status = CELL_OK;
 	info->attr = CELL_VDEC_PICITEM_ATTR_NORMAL;
-	info->picInfo_addr = info.addr() + SIZE_32(CellVdecPicItem);
+
+	const vm::addr_t picinfo_addr{info.addr() + ::offset32(&all_info_t::picInfo)};
+	info->picInfo_addr = picinfo_addr;
 
 	if (vdec->type == CELL_VDEC_CODEC_TYPE_AVC)
 	{
-		const vm::ptr<CellVdecAvcInfo> avc = vm::cast(info.addr() + SIZE_32(CellVdecPicItem));
+		const vm::ptr<CellVdecAvcInfo> avc = picinfo_addr;
 
 		avc->horizontalSize = frame->width;
 		avc->verticalSize = frame->height;
@@ -806,7 +1038,7 @@ s32 cellVdecGetPicItem(u32 handle, vm::pptr<CellVdecPicItem> picItem)
 	}
 	else if (vdec->type == CELL_VDEC_CODEC_TYPE_DIVX)
 	{
-		const vm::ptr<CellVdecDivxInfo> dvx = vm::cast(info.addr() + SIZE_32(CellVdecPicItem));
+		const vm::ptr<CellVdecDivxInfo> dvx = picinfo_addr;
 
 		switch (s32 pct = frame->pict_type)
 		{
@@ -842,7 +1074,7 @@ s32 cellVdecGetPicItem(u32 handle, vm::pptr<CellVdecPicItem> picItem)
 	}
 	else if (vdec->type == CELL_VDEC_CODEC_TYPE_MPEG2)
 	{
-		const vm::ptr<CellVdecMpeg2Info> mp2 = vm::cast(info.addr() + SIZE_32(CellVdecPicItem));
+		const vm::ptr<CellVdecMpeg2Info> mp2 = picinfo_addr;
 
 		std::memset(mp2.get_ptr(), 0, sizeof(CellVdecMpeg2Info));
 		mp2->horizontal_size = frame->width;
@@ -886,50 +1118,67 @@ s32 cellVdecGetPicItem(u32 handle, vm::pptr<CellVdecPicItem> picItem)
 	return CELL_OK;
 }
 
-s32 cellVdecSetFrameRate(u32 handle, CellVdecFrameRate frc)
+error_code cellVdecSetFrameRate(u32 handle, CellVdecFrameRate frameRateCode)
 {
-	cellVdec.trace("cellVdecSetFrameRate(handle=0x%x, frc=0x%x)", handle, (s32)frc);
+	cellVdec.trace("cellVdecSetFrameRate(handle=0x%x, frameRateCode=0x%x)", handle, +frameRateCode);
 
-	const auto vdec = idm::get<ppu_thread, vdec_thread>(handle);
+	const auto vdec = idm::get<vdec_context>(handle);
 
-	if (!vdec)
+	// 0x80 seems like a common prefix
+	if (!vdec || (frameRateCode & 0xf8) != 0x80)
 	{
 		return CELL_VDEC_ERROR_ARG;
 	}
 
-	// TODO: check frc value
-	vdec->cmd_push({vdec_cmd::set_frc, frc});
-	vdec->notify();
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
+	vdec->in_cmd.push(CellVdecFrameRate{ frameRateCode & 0x87 });
 	return CELL_OK;
 }
 
-s32 cellVdecOpenExt()
+error_code cellVdecOpenExt()
 {
 	UNIMPLEMENTED_FUNC(cellVdec);
 	return CELL_OK;
 }
 
-s32 cellVdecStartSeqExt()
+error_code cellVdecStartSeqExt()
 {
 	UNIMPLEMENTED_FUNC(cellVdec);
 	return CELL_OK;
 }
 
-s32 cellVdecGetPicItemExt()
+error_code cellVdecGetPicItemEx()
 {
 	UNIMPLEMENTED_FUNC(cellVdec);
 	return CELL_OK;
 }
 
-s32 cellVdecSetFrameRateExt()
+error_code cellVdecGetPicItemExt()
 {
 	UNIMPLEMENTED_FUNC(cellVdec);
 	return CELL_OK;
 }
 
-s32 cellVdecSetPts()
+error_code cellVdecSetFrameRateExt()
 {
 	UNIMPLEMENTED_FUNC(cellVdec);
+	return CELL_OK;
+}
+
+error_code cellVdecSetPts(u32 handle, vm::ptr<void> unk)
+{
+	cellVdec.error("cellVdecSetPts(handle=0x%x, unk=*0x%x)", handle, unk);
+
+	const auto vdec = idm::get<vdec_context>(handle);
+
+	if (!vdec || !unk)
+	{
+		return CELL_VDEC_ERROR_ARG;
+	}
+
+	// TODO: return CELL_VDEC_ERROR_SEQ
+
 	return CELL_OK;
 }
 
@@ -956,11 +1205,15 @@ DECLARE(ppu_module_manager::cellVdec)("libvdec", []()
 	REG_FUNC(libvdec, cellVdecStartSeqExt); // 0xebb8e70a
 	REG_FUNC(libvdec, cellVdecEndSeq);
 	REG_FUNC(libvdec, cellVdecDecodeAu);
+	REG_FUNC(libvdec, cellVdecDecodeAuEx2);
 	REG_FUNC(libvdec, cellVdecGetPicture);
 	REG_FUNC(libvdec, cellVdecGetPictureExt); // 0xa21aa896
 	REG_FUNC(libvdec, cellVdecGetPicItem);
+	REG_FUNC(libvdec, cellVdecGetPicItemEx);
 	REG_FUNC(libvdec, cellVdecGetPicItemExt); // 0x2cbd9806
 	REG_FUNC(libvdec, cellVdecSetFrameRate);
 	REG_FUNC(libvdec, cellVdecSetFrameRateExt); // 0xcffc42a5
 	REG_FUNC(libvdec, cellVdecSetPts); // 0x3ce2e4f8
+
+	REG_FUNC(libvdec, vdecEntry).flag(MFF_HIDDEN);
 });

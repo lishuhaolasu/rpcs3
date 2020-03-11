@@ -25,13 +25,13 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{78CB2F39-B809-4A06-8329-8C0A19119D3D}</ProjectGuid>
     <RootNamespace>XAudio</RootNamespace>
-    <WindowsTargetPlatformVersion>8.1</WindowsTargetPlatformVersion>
   </PropertyGroup>
+  <Import Project="..\common_default.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="..\common_default_macros.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v140</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -63,7 +63,7 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\3rdparty\XAudio2_7;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\3rdparty\XAudio2Redist\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -72,12 +72,10 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\rpcs3\Emu\Audio\XAudio2\XAudio2Thread.h" />
+    <ClInclude Include="Emu\Audio\XAudio2\XAudio2Backend.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\rpcs3\Emu\Audio\XAudio2\XAudio2Thread.cpp" />
-    <ClCompile Include="Emu\Audio\XAudio2\XAudio27Thread.cpp" />
-    <ClCompile Include="Emu\Audio\XAudio2\XAudio28Thread.cpp" />
+    <ClCompile Include="Emu\Audio\XAudio2\XAudio2Backend.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

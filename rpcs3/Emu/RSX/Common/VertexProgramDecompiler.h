@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Emu/RSX/RSXVertexProgram.h"
 #include <vector>
 #include <set>
@@ -27,6 +27,13 @@ struct VertexProgramDecompiler
 	D3 d3;
 	SRC src[3];
 
+	enum
+	{
+		lt = 0x1,
+		eq = 0x2,
+		gt = 0x4,
+	};
+
 	struct FuncInfo
 	{
 		u32 offset;
@@ -53,11 +60,10 @@ struct VertexProgramDecompiler
 	Instruction* m_cur_instr;
 	size_t m_instr_count;
 
-	std::set<int> m_jump_lvls;
 	std::vector<std::string> m_body;
 	std::stack<u32> m_call_stack;
 
-	const std::vector<u32>& m_data;
+	const RSXVertexProgram& m_prog;
 	ParamArray m_parr;
 
 	std::string NotZeroPositive(const std::string& code);
@@ -65,18 +71,17 @@ struct VertexProgramDecompiler
 	std::string GetVecMask();
 	std::string GetScaMask();
 	std::string GetDST(bool is_sca = false);
-	std::string GetSRC(const u32 n);
+	std::string GetSRC(u32 n);
 	std::string GetTex();
+	std::string GetRawCond();
 	std::string GetCond();
 	std::string GetOptionalBranchCond();	//Conditional branch expression modified externally at runtime
-	std::string AddAddrMask();
 	std::string AddAddrReg();
-	std::string AddAddrRegWithoutMask();
 	std::string AddCondReg();
 	u32 GetAddr();
 	std::string Format(const std::string& code);
 
-	void AddCodeCond(const std::string& dst, const std::string& src);
+	void AddCodeCond(const std::string& lhs, const std::string& rhs);
 	void AddCode(const std::string& code);
 	void SetDST(bool is_sca, std::string value);
 	void SetDSTVec(const std::string& code);
@@ -99,7 +104,7 @@ protected:
 
 	/** returns string calling comparison function on 2 args passed as strings.
 	*/
-	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &) = 0;
+	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &, bool scalar = false) = 0;
 
 	/** Insert header of shader file (eg #version, "system constants"...)
 	*/

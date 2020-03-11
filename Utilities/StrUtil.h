@@ -5,29 +5,15 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <string_view>
 
-// Copy null-terminated string from std::string to char array with truncation
-template <std::size_t N>
-inline void strcpy_trunc(char (&dst)[N], const std::string& src)
+// Copy null-terminated string from a std::string or a char array to a char array with truncation
+template <typename D, typename T>
+inline void strcpy_trunc(D& dst, const T& src)
 {
-	const std::size_t count = src.size() >= N ? N - 1 : src.size();
-	std::memcpy(dst, src.c_str(), count);
-	dst[count] = '\0';
-}
-
-// Copy null-terminated string from char array to another char array with truncation
-template <std::size_t N, std::size_t N2>
-inline void strcpy_trunc(char (&dst)[N], const char (&src)[N2])
-{
-	const std::size_t count = N2 >= N ? N - 1 : N2;
-	std::memcpy(dst, src, count);
-	dst[count] = '\0';
-}
-
-template <std::size_t N>
-inline bool ends_with(const std::string& src, const char (&end)[N])
-{
-	return src.size() >= N - 1 && src.compare(src.size() - (N - 1), N - 1, end, N - 1) == 0;
+	const std::size_t count = std::size(src) >= std::size(dst) ? std::size(dst) - 1 : std::size(src);
+	std::memcpy(std::data(dst), std::data(src), count);
+	std::memset(std::data(dst) + count, 0, std::size(dst) - count);
 }
 
 namespace fmt
@@ -100,10 +86,10 @@ namespace fmt
 		auto end = source.end();
 		for (--end; it != end; ++it)
 		{
-			result += *it + separator;
+			result += std::string{*it} + separator;
 		}
 
-		return result + source.back();
+		return result + std::string{source.back()};
 	}
 
 	template <typename T>

@@ -5,7 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 
-extern logs::channel sysPrxForUser;
+LOG_CHANNEL(sysPrxForUser);
 
 // cfmt implementation (TODO)
 
@@ -24,13 +24,13 @@ struct ps3_fmt_src
 	template <typename T>
 	T get(std::size_t index) const
 	{
-		const u32 i = (u32)index + g_count;
+		const u32 i = static_cast<u32>(index) + g_count;
 		return ppu_gpr_cast<T>(i < 8 ? ctx->gpr[3 + i] : +*ctx->get_stack_arg(i));
 	}
 
 	void skip(std::size_t extra)
 	{
-		g_count += (u32)extra + 1;
+		g_count += static_cast<u32>(extra) + 1;
 	}
 
 	std::size_t fmt_string(std::string& out, std::size_t extra) const
@@ -58,8 +58,7 @@ struct ps3_fmt_src
 template <>
 f64 ps3_fmt_src::get<f64>(std::size_t index) const
 {
-	const u64 value = get<u64>(index);
-	return *reinterpret_cast<const f64*>(reinterpret_cast<const u8*>(&value));
+	return std::bit_cast<f64>(get<u64>(index));
 }
 
 static std::string ps3_fmt(ppu_thread& context, vm::cptr<char> fmt, u32 g_count)
@@ -405,7 +404,7 @@ s32 _sys_snprintf(ppu_thread& ppu, vm::ptr<char> dst, u32 count, vm::cptr<char> 
 	}
 	else
 	{
-		count = (u32)std::min<size_t>(count - 1, result.size());
+		count = static_cast<u32>(std::min<size_t>(count - 1, result.size()));
 
 		std::memcpy(dst.get_ptr(), result.c_str(), count);
 		dst[count] = 0;
@@ -437,17 +436,20 @@ s32 _sys_sprintf(ppu_thread& ppu, vm::ptr<char> buffer, vm::cptr<char> fmt, ppu_
 
 s32 _sys_vprintf()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	sysPrxForUser.todo("_sys_vprintf()");
+	return CELL_OK;
 }
 
 s32 _sys_vsnprintf()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	sysPrxForUser.todo("_sys_vsnprintf()");
+	return CELL_OK;
 }
 
 s32 _sys_vsprintf()
 {
-	fmt::throw_exception("Unimplemented" HERE);
+	sysPrxForUser.todo("_sys_vsprintf()");
+	return CELL_OK;
 }
 
 void _sys_qsort(vm::ptr<void> base, u32 nelem, u32 size, vm::ptr<qsortcmp> cmp)

@@ -1,13 +1,12 @@
-#include "stdafx.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
 
 #include "cellRudp.h"
 
-logs::channel cellRudp("cellRudp");
+LOG_CHANNEL(cellRudp);
 
-struct rudp_t
+struct rudp_info
 {
 	// allocator functions
 	std::function<vm::ptr<void>(ppu_thread& ppu, u32 size)> malloc;
@@ -22,9 +21,9 @@ s32 cellRudpInit(vm::ptr<CellRudpAllocator> allocator)
 {
 	cellRudp.warning("cellRudpInit(allocator=*0x%x)", allocator);
 
-	const auto rudp = fxm::make<rudp_t>();
+	const auto rudp = g_fxo->get<rudp_info>();
 
-	if (!rudp)
+	if (rudp->malloc)
 	{
 		return CELL_RUDP_ERROR_ALREADY_INITIALIZED;
 	}
@@ -57,10 +56,16 @@ s32 cellRudpEnd()
 {
 	cellRudp.warning("cellRudpEnd()");
 
-	if (!fxm::remove<rudp_t>())
+	const auto rudp = g_fxo->get<rudp_info>();
+
+	if (!rudp->malloc)
 	{
 		return CELL_RUDP_ERROR_NOT_INITIALIZED;
 	}
+
+	rudp->malloc = nullptr;
+	rudp->free = nullptr;
+	rudp->handler = vm::null;
 
 	return CELL_OK;
 }
@@ -75,9 +80,9 @@ s32 cellRudpSetEventHandler(vm::ptr<CellRudpEventHandler> handler, vm::ptr<void>
 {
 	cellRudp.todo("cellRudpSetEventHandler(handler=*0x%x, arg=*0x%x)", handler, arg);
 
-	const auto rudp = fxm::get<rudp_t>();
+	const auto rudp = g_fxo->get<rudp_info>();
 
-	if (!rudp)
+	if (!rudp->malloc)
 	{
 		return CELL_RUDP_ERROR_NOT_INITIALIZED;
 	}
@@ -142,7 +147,19 @@ s32 cellRudpGetRemoteInfo()
 	return CELL_OK;
 }
 
+s32 cellRudpAccept()
+{
+	UNIMPLEMENTED_FUNC(cellRudp);
+	return CELL_OK;
+}
+
 s32 cellRudpBind()
+{
+	UNIMPLEMENTED_FUNC(cellRudp);
+	return CELL_OK;
+}
+
+s32 cellRudpListen()
 {
 	UNIMPLEMENTED_FUNC(cellRudp);
 	return CELL_OK;
@@ -256,7 +273,9 @@ DECLARE(ppu_module_manager::cellRudp)("cellRudp", []()
 	REG_FUNC(cellRudp, cellRudpGetLocalInfo);
 	REG_FUNC(cellRudp, cellRudpGetRemoteInfo);
 
+	REG_FUNC(cellRudp, cellRudpAccept);
 	REG_FUNC(cellRudp, cellRudpBind);
+	REG_FUNC(cellRudp, cellRudpListen);
 	REG_FUNC(cellRudp, cellRudpInitiate);
 	REG_FUNC(cellRudp, cellRudpActivate);
 	REG_FUNC(cellRudp, cellRudpTerminate);

@@ -1,16 +1,13 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "sys_interrupt.h"
+
 #include "Emu/IdManager.h"
 
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/PPUOpcodes.h"
-#include "sys_interrupt.h"
 
-
-
-logs::channel sys_interrupt("sys_interrupt");
+LOG_CHANNEL(sys_interrupt);
 
 void lv2_int_serv::exec()
 {
@@ -22,25 +19,33 @@ void lv2_int_serv::exec()
 		{ ppu_cmd::sleep, 0 }
 	});
 
-	thread->notify();
+	thread_ctrl::notify(*thread);
+}
+
+bool interrupt_thread_exit(ppu_thread& ppu)
+{
+	ppu.state += cpu_flag::exit;
+	return false;
 }
 
 void lv2_int_serv::join()
 {
-	// Enqueue _sys_ppu_thread_exit call
 	thread->cmd_list
 	({
-		{ ppu_cmd::set_args, 1 }, u64{0},
-		{ ppu_cmd::set_gpr, 11 }, u64{41},
-		{ ppu_cmd::opcode, ppu_instructions::SC(0) },
+		{ ppu_cmd::ptr_call, 0 },
+		std::bit_cast<u64>(&interrupt_thread_exit)
 	});
 
-	thread->notify();
-	thread->join();
+	thread_ctrl::notify(*thread);
+	(*thread)();
+
+	idm::remove<named_thread<ppu_thread>>(thread->id);
 }
 
-error_code sys_interrupt_tag_destroy(u32 intrtag)
+error_code sys_interrupt_tag_destroy(ppu_thread& ppu, u32 intrtag)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_interrupt.warning("sys_interrupt_tag_destroy(intrtag=0x%x)", intrtag);
 
 	const auto tag = idm::withdraw<lv2_obj, lv2_int_tag>(intrtag, [](lv2_int_tag& tag) -> CellError
@@ -66,8 +71,10 @@ error_code sys_interrupt_tag_destroy(u32 intrtag)
 	return CELL_OK;
 }
 
-error_code _sys_interrupt_thread_establish(vm::ptr<u32> ih, u32 intrtag, u32 intrthread, u64 arg1, u64 arg2)
+error_code _sys_interrupt_thread_establish(ppu_thread& ppu, vm::ptr<u32> ih, u32 intrtag, u32 intrthread, u64 arg1, u64 arg2)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_interrupt.warning("_sys_interrupt_thread_establish(ih=*0x%x, intrtag=0x%x, intrthread=0x%x, arg1=0x%llx, arg2=0x%llx)", ih, intrtag, intrthread, arg1, arg2);
 
 	CellError error = CELL_EAGAIN;
@@ -86,7 +93,7 @@ error_code _sys_interrupt_thread_establish(vm::ptr<u32> ih, u32 intrtag, u32 int
 		}
 
 		// Get interrupt thread
-		const auto it = idm::get_unlocked<ppu_thread>(intrthread);
+		const auto it = idm::get_unlocked<named_thread<ppu_thread>>(intrthread);
 
 		if (!it)
 		{
@@ -95,7 +102,7 @@ error_code _sys_interrupt_thread_establish(vm::ptr<u32> ih, u32 intrtag, u32 int
 		}
 
 		// If interrupt thread is running, it's already established on another interrupt tag
-		if (!test(it->state & cpu_flag::stop))
+		if (!(it->state & cpu_flag::stop))
 		{
 			error = CELL_EAGAIN;
 			return result;
@@ -110,7 +117,8 @@ error_code _sys_interrupt_thread_establish(vm::ptr<u32> ih, u32 intrtag, u32 int
 
 		result = std::make_shared<lv2_int_serv>(it, arg1, arg2);
 		tag->handler = result;
-		it->run();
+		it->state -= cpu_flag::stop;
+		thread_ctrl::notify(*it);
 		return result;
 	});
 
@@ -125,13 +133,15 @@ error_code _sys_interrupt_thread_establish(vm::ptr<u32> ih, u32 intrtag, u32 int
 
 error_code _sys_interrupt_thread_disestablish(ppu_thread& ppu, u32 ih, vm::ptr<u64> r13)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_interrupt.warning("_sys_interrupt_thread_disestablish(ih=0x%x, r13=*0x%x)", ih, r13);
 
 	const auto handler = idm::withdraw<lv2_obj, lv2_int_serv>(ih);
 
 	if (!handler)
 	{
-		if (const auto thread = idm::withdraw<ppu_thread>(ih))
+		if (const auto thread = idm::withdraw<named_thread<ppu_thread>>(ih))
 		{
 			*r13 = thread->gpr[13];
 			return CELL_OK;

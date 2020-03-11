@@ -1,9 +1,13 @@
-#include "debugger_list.h"
+﻿#include "debugger_list.h"
+#include "gui_settings.h"
+#include "breakpoint_handler.h"
 
 #include "Emu/Cell/SPUThread.h"
+#include "Emu/Cell/PPUThread.h"
+#include "Emu/CPU/CPUDisAsm.h"
+#include "Emu/CPU/CPUThread.h"
 #include "Emu/System.h"
 
-#include <QApplication>
 #include <QMouseEvent>
 #include <QWheelEvent>
 
@@ -11,8 +15,10 @@
 
 constexpr auto qstr = QString::fromStdString;
 
-debugger_list::debugger_list(QWidget* parent, std::shared_ptr<gui_settings> settings, breakpoint_handler* handler) : QListWidget(parent), m_breakpoint_handler(handler),
-	xgui_settings(settings), m_pc(0), m_item_count(30)
+debugger_list::debugger_list(QWidget* parent, std::shared_ptr<gui_settings> settings, breakpoint_handler* handler)
+	: QListWidget(parent)
+	, xgui_settings(settings)
+	, m_breakpoint_handler(handler)
 {
 	setWindowTitle(tr("ASM"));
 	for (uint i = 0; i < m_item_count; ++i)
@@ -37,7 +43,7 @@ u32 debugger_list::GetPc() const
 		return 0;
 	}
 
-	return cpu->id_type() == 1 ? static_cast<ppu_thread*>(cpu.get())->cia : static_cast<SPUThread*>(cpu.get())->pc;
+	return cpu->id_type() == 1 ? static_cast<ppu_thread*>(cpu.get())->cia : static_cast<spu_thread*>(cpu.get())->pc;
 }
 
 u32 debugger_list::GetCenteredAddress(u32 address) const
@@ -73,10 +79,10 @@ void debugger_list::ShowAddress(u32 addr)
 	else
 	{
 		const bool is_spu = cpu->id_type() != 1;
-		const u32 cpu_offset = is_spu ? static_cast<SPUThread&>(*cpu).offset : 0;
+		const u32 cpu_offset = is_spu ? static_cast<spu_thread&>(*cpu).offset : 0;
 		const u32 address_limits = is_spu ? 0x3ffff : ~0;
 		m_pc &= address_limits;
-		m_disasm->offset = (u8*)vm::base(cpu_offset);
+		m_disasm->offset = vm::get_super_ptr(cpu_offset);
 		for (uint i = 0, count = 4; i<m_item_count; ++i, m_pc = (m_pc + count) & address_limits)
 		{
 			if (!vm::check_addr(cpu_offset + m_pc, 4))
@@ -90,20 +96,20 @@ void debugger_list::ShowAddress(u32 addr)
 
 			item(i)->setText((IsBreakpoint(m_pc) ? ">>> " : "    ") + qstr(m_disasm->last_opcode));
 
-			if (test(cpu->state & cpu_state_pause) && m_pc == GetPc())
+			if (cpu->is_paused() && m_pc == GetPc())
 			{
-				item(i)->setTextColor(m_text_color_pc);
-				item(i)->setBackgroundColor(m_color_pc);
+				item(i)->setForeground(m_text_color_pc);
+				item(i)->setBackground(m_color_pc);
 			}
 			else if (IsBreakpoint(m_pc))
 			{
-				item(i)->setTextColor(m_text_color_bp);
-				item(i)->setBackgroundColor(m_color_bp);
+				item(i)->setForeground(m_text_color_bp);
+				item(i)->setBackground(m_color_bp);
 			}
 			else
 			{
-				item(i)->setTextColor(palette().color(foregroundRole()));
-				item(i)->setBackgroundColor(palette().color(backgroundRole()));
+				item(i)->setForeground(palette().color(foregroundRole()));
+				item(i)->setBackground(palette().color(backgroundRole()));
 			}
 		}
 	}

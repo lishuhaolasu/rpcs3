@@ -1,82 +1,71 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
+﻿#include "stdafx.h"
+#include "sys_timer.h"
+
 #include "Emu/IdManager.h"
 
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/PPUThread.h"
 #include "sys_event.h"
 #include "sys_process.h"
-#include "sys_timer.h"
 
 #include <thread>
 
+LOG_CHANNEL(sys_timer);
 
+extern u64 get_guest_system_time();
 
-logs::channel sys_timer("sys_timer");
-
-extern u64 get_system_time();
-
-void lv2_timer::on_task()
+void lv2_timer_context::operator()()
 {
-	while (!Emu.IsStopped())
+	while (thread_ctrl::state() != thread_state::aborting)
 	{
-		const u32 _state = state;
-
-		if (_state == SYS_TIMER_STATE_RUN)
+		if (state == SYS_TIMER_STATE_RUN)
 		{
-			const u64 _now = get_system_time();
-			const u64 next = expire;
+			const u64 _now = get_guest_system_time();
+			u64 next = expire;
 
 			if (_now >= next)
 			{
-				semaphore_lock lock(mutex);
+				std::lock_guard lock(mutex);
+
+				if (next = expire; _now < next)
+				{
+					// expire was updated in the middle, don't send an event
+					continue;
+				}
 
 				if (const auto queue = port.lock())
 				{
 					queue->send(source, data1, data2, next);
-
-					if (period)
-					{
-						// Set next expiration time and check again (HACK)
-						expire += period;
-						continue;
-					}
 				}
 
-				// Stop: oneshot or the event port was disconnected (TODO: is it correct?)
-				state = SYS_TIMER_STATE_STOP;
+				if (period)
+				{
+					// Set next expiration time and check again
+					expire += period;
+					continue;
+				}
+
+				// Stop after oneshot
+				state.release(SYS_TIMER_STATE_STOP);
 				continue;
 			}
 
 			// TODO: use single global dedicated thread for busy waiting, no timer threads
-			lv2_obj::sleep_timeout(*this, next - _now);
-			thread_ctrl::wait_for(next - _now);
+			lv2_obj::wait_timeout(next - _now);
+			continue;
 		}
-		else if (_state == SYS_TIMER_STATE_STOP)
-		{
-			thread_ctrl::wait_for(10000);
-		}
-		else
-		{
-			break;
-		}
+
+		thread_ctrl::wait();
 	}
 }
 
-void lv2_timer::on_stop()
+error_code sys_timer_create(ppu_thread& ppu, vm::ptr<u32> timer_id)
 {
-	// Signal thread using invalid state
-	state = -1;
-	notify();
-	join();
-}
+	vm::temporary_unlock(ppu);
 
-error_code sys_timer_create(vm::ptr<u32> timer_id)
-{
 	sys_timer.warning("sys_timer_create(timer_id=*0x%x)", timer_id);
 
-	if (const u32 id = idm::make<lv2_obj, lv2_timer>())
+	if (const u32 id = idm::make<lv2_obj, lv2_timer>("Timer Thread"))
 	{
 		*timer_id = id;
 		return CELL_OK;
@@ -85,19 +74,20 @@ error_code sys_timer_create(vm::ptr<u32> timer_id)
 	return CELL_EAGAIN;
 }
 
-error_code sys_timer_destroy(u32 timer_id)
+error_code sys_timer_destroy(ppu_thread& ppu, u32 timer_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.warning("sys_timer_destroy(timer_id=0x%x)", timer_id);
 
 	const auto timer = idm::withdraw<lv2_obj, lv2_timer>(timer_id, [&](lv2_timer& timer) -> CellError
 	{
-		semaphore_lock lock(timer.mutex);
-
-		if (!timer.port.expired())
+		if (std::shared_lock lock(timer.mutex); !timer.port.expired())
 		{
 			return CELL_EISCONN;
 		}
 
+		timer = thread_state::aborting;
 		return {};
 	});
 
@@ -114,17 +104,28 @@ error_code sys_timer_destroy(u32 timer_id)
 	return CELL_OK;
 }
 
-error_code sys_timer_get_information(u32 timer_id, vm::ptr<sys_timer_information_t> info)
+error_code sys_timer_get_information(ppu_thread& ppu, u32 timer_id, vm::ptr<sys_timer_information_t> info)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.trace("sys_timer_get_information(timer_id=0x%x, info=*0x%x)", timer_id, info);
 
 	const auto timer = idm::check<lv2_obj, lv2_timer>(timer_id, [&](lv2_timer& timer)
 	{
-		semaphore_lock lock(timer.mutex);
+		std::shared_lock lock(timer.mutex);
 
-		info->next_expire = timer.expire;
-		info->period      = timer.period;
-		info->timer_state = timer.state;
+		if (timer.state == SYS_TIMER_STATE_RUN)
+		{
+			info->timer_state = SYS_TIMER_STATE_RUN;
+			info->next_expire = timer.expire;
+			info->period      = timer.period;
+		}
+		else
+		{
+			info->timer_state = SYS_TIMER_STATE_STOP;
+			info->next_expire = 0;
+			info->period      = 0;
+		}
 	});
 
 	if (!timer)
@@ -135,11 +136,13 @@ error_code sys_timer_get_information(u32 timer_id, vm::ptr<sys_timer_information
 	return CELL_OK;
 }
 
-error_code _sys_timer_start(u32 timer_id, u64 base_time, u64 period)
+error_code _sys_timer_start(ppu_thread& ppu, u32 timer_id, u64 base_time, u64 period)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.trace("_sys_timer_start(timer_id=0x%x, base_time=0x%llx, period=0x%llx)", timer_id, base_time, period);
 
-	const u64 start_time = get_system_time();
+	const u64 start_time = get_guest_system_time();
 
 	if (!period && start_time >= base_time)
 	{
@@ -155,7 +158,7 @@ error_code _sys_timer_start(u32 timer_id, u64 base_time, u64 period)
 
 	const auto timer = idm::check<lv2_obj, lv2_timer>(timer_id, [&](lv2_timer& timer) -> CellError
 	{
-		semaphore_lock lock(timer.mutex);
+		std::unique_lock lock(timer.mutex);
 
 		if (timer.state != SYS_TIMER_STATE_STOP)
 		{
@@ -171,7 +174,9 @@ error_code _sys_timer_start(u32 timer_id, u64 base_time, u64 period)
 		timer.expire = base_time ? base_time : start_time + period;
 		timer.period = period;
 		timer.state  = SYS_TIMER_STATE_RUN;
-		timer.notify();
+
+		lock.unlock();
+		thread_ctrl::notify(timer);
 		return {};
 	});
 
@@ -188,13 +193,15 @@ error_code _sys_timer_start(u32 timer_id, u64 base_time, u64 period)
 	return CELL_OK;
 }
 
-error_code sys_timer_stop(u32 timer_id)
+error_code sys_timer_stop(ppu_thread& ppu, u32 timer_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.trace("sys_timer_stop()");
 
 	const auto timer = idm::check<lv2_obj, lv2_timer>(timer_id, [](lv2_timer& timer)
 	{
-		semaphore_lock lock(timer.mutex);
+		std::lock_guard lock(timer.mutex);
 
 		timer.state = SYS_TIMER_STATE_STOP;
 	});
@@ -207,8 +214,10 @@ error_code sys_timer_stop(u32 timer_id)
 	return CELL_OK;
 }
 
-error_code sys_timer_connect_event_queue(u32 timer_id, u32 queue_id, u64 name, u64 data1, u64 data2)
+error_code sys_timer_connect_event_queue(ppu_thread& ppu, u32 timer_id, u32 queue_id, u64 name, u64 data1, u64 data2)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.warning("sys_timer_connect_event_queue(timer_id=0x%x, queue_id=0x%x, name=0x%llx, data1=0x%llx, data2=0x%llx)", timer_id, queue_id, name, data1, data2);
 
 	const auto timer = idm::check<lv2_obj, lv2_timer>(timer_id, [&](lv2_timer& timer) -> CellError
@@ -220,7 +229,7 @@ error_code sys_timer_connect_event_queue(u32 timer_id, u32 queue_id, u64 name, u
 			return CELL_ESRCH;
 		}
 
-		semaphore_lock lock(timer.mutex);
+		std::lock_guard lock(timer.mutex);
 
 		if (!timer.port.expired())
 		{
@@ -229,7 +238,7 @@ error_code sys_timer_connect_event_queue(u32 timer_id, u32 queue_id, u64 name, u
 
 		// Connect event queue
 		timer.port   = std::static_pointer_cast<lv2_event_queue>(found->second);
-		timer.source = name ? name : ((u64)process_getpid() << 32) | timer_id;
+		timer.source = name ? name : (s64{process_getpid()} << 32) | u64{timer_id};
 		timer.data1  = data1;
 		timer.data2  = data2;
 		return {};
@@ -248,20 +257,23 @@ error_code sys_timer_connect_event_queue(u32 timer_id, u32 queue_id, u64 name, u
 	return CELL_OK;
 }
 
-error_code sys_timer_disconnect_event_queue(u32 timer_id)
+error_code sys_timer_disconnect_event_queue(ppu_thread& ppu, u32 timer_id)
 {
+	vm::temporary_unlock(ppu);
+
 	sys_timer.warning("sys_timer_disconnect_event_queue(timer_id=0x%x)", timer_id);
 
 	const auto timer = idm::check<lv2_obj, lv2_timer>(timer_id, [](lv2_timer& timer) -> CellError
 	{
-		semaphore_lock lock(timer.mutex);
+		std::lock_guard lock(timer.mutex);
+
+		timer.state = SYS_TIMER_STATE_STOP;
 
 		if (timer.port.expired())
 		{
 			return CELL_ENOTCONN;
 		}
 
-		timer.state = SYS_TIMER_STATE_STOP;
 		timer.port.reset();
 		return {};
 	});
@@ -296,40 +308,18 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 
 	if (sleep_time)
 	{
-#ifdef __linux__
-		constexpr u32 host_min_quantum = 100;
-#else
-		// Host scheduler quantum for windows (worst case)
-		// NOTE: On ps3 this function has very high accuracy
-		constexpr u32 host_min_quantum = 500;
-#endif
-
-		u64 passed = 0;
-		u64 remaining;
-
 		lv2_obj::sleep(ppu, sleep_time);
 
-		while (sleep_time >= passed)
+		lv2_obj::wait_timeout<true>(sleep_time);
+
+		if (ppu.is_stopped())
 		{
-			remaining = sleep_time - passed;
-
-			if (remaining > host_min_quantum)
-			{
-				// Wait on multiple of min quantum for large durations
-				thread_ctrl::wait_for(remaining - (remaining % host_min_quantum));
-			}
-			else
-			{
-				// Try yielding. May cause long wake latency but helps weaker CPUs a lot by alleviating resource pressure
-				std::this_thread::yield();
-			}
-
-			passed = (get_system_time() - ppu.start_time);
+			return 0;
 		}
 	}
 	else
 	{
-		lv2_obj::yield(ppu);
+		std::this_thread::yield();
 	}
 
 	return CELL_OK;

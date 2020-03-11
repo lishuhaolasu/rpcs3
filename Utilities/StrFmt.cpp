@@ -2,8 +2,11 @@
 #include "BEType.h"
 #include "StrUtil.h"
 #include "cfmt.h"
+#include "util/logs.hpp"
 
 #include <algorithm>
+#include <string_view>
+#include "Thread.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -73,32 +76,31 @@ void fmt_class_string<fmt::base57>::format(std::string& out, u64 arg)
 
 void fmt_class_string<const void*>::format(std::string& out, u64 arg)
 {
-	if (arg)
-	{
-		fmt::append(out, "%p", reinterpret_cast<const void*>(static_cast<std::uintptr_t>(arg)));
-	}
-	else
-	{
-		out += "(NULL)";
-	}
+	fmt::append(out, "%p", arg);
 }
 
 void fmt_class_string<const char*>::format(std::string& out, u64 arg)
 {
 	if (arg)
 	{
-		out += reinterpret_cast<const char*>(static_cast<std::uintptr_t>(arg));
+		out += reinterpret_cast<const char*>(arg);
 	}
 	else
 	{
-		out += "(NULL)";
+		out += "(NULLSTR)";
 	}
 }
 
 template <>
 void fmt_class_string<std::string>::format(std::string& out, u64 arg)
 {
-	out += get_object(arg).c_str(); // TODO?
+	out += get_object(arg);
+}
+
+template <>
+void fmt_class_string<std::string_view>::format(std::string& out, u64 arg)
+{
+	out += get_object(arg);
 }
 
 template <>
@@ -177,13 +179,13 @@ void fmt_class_string<ullong>::format(std::string& out, u64 arg)
 template <>
 void fmt_class_string<float>::format(std::string& out, u64 arg)
 {
-	fmt::append(out, "%gf", static_cast<float>(reinterpret_cast<f64&>(arg)));
+	fmt::append(out, "%gf", static_cast<float>(std::bit_cast<f64>(arg)));
 }
 
 template <>
 void fmt_class_string<double>::format(std::string& out, u64 arg)
 {
-	fmt::append(out, "%g", reinterpret_cast<f64&>(arg));
+	fmt::append(out, "%g", std::bit_cast<f64>(arg));
 }
 
 template <>
@@ -203,7 +205,7 @@ namespace fmt
 {
 	void raw_error(const char* msg)
 	{
-		throw std::runtime_error{msg};
+		thread_ctrl::emergency_exit(msg);
 	}
 
 	void raw_verify_error(const char* msg, const fmt_type_info* sup, u64 arg)
@@ -236,7 +238,7 @@ namespace fmt
 			out += msg;
 		}
 
-		throw std::runtime_error{out};
+		thread_ctrl::emergency_exit(out);
 	}
 
 	void raw_narrow_error(const char* msg, const fmt_type_info* sup, u64 arg)
@@ -256,27 +258,15 @@ namespace fmt
 			out += msg;
 		}
 
-		throw std::range_error{out};
+		thread_ctrl::emergency_exit(out);
 	}
 
-	// Hidden template
-	template <typename T>
 	void raw_throw_exception(const char* fmt, const fmt_type_info* sup, const u64* args)
 	{
 		std::string out;
 		raw_append(out, fmt, sup, args);
-		throw T{out};
+		thread_ctrl::emergency_exit(out);
 	}
-
-	// Explicit instantiations (not exhaustive)
-	template void raw_throw_exception<std::runtime_error>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::logic_error>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::domain_error>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::invalid_argument>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::out_of_range>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::range_error>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::overflow_error>(const char*, const fmt_type_info*, const u64*);
-	template void raw_throw_exception<std::underflow_error>(const char*, const fmt_type_info*, const u64*);
 
 	struct cfmt_src;
 }
@@ -354,7 +344,7 @@ std::string fmt::replace_first(const std::string& src, const std::string& from, 
 {
 	auto pos = src.find(from);
 
-	if (pos == std::string::npos)
+	if (pos == umax)
 	{
 		return src;
 	}
@@ -365,7 +355,7 @@ std::string fmt::replace_first(const std::string& src, const std::string& from, 
 std::string fmt::replace_all(const std::string& src, const std::string& from, const std::string& to)
 {
 	std::string target = src;
-	for (auto pos = target.find(from); pos != std::string::npos; pos = target.find(from, pos + 1))
+	for (auto pos = target.find(from); pos != umax; pos = target.find(from, pos + 1))
 	{
 		target = (pos ? target.substr(0, pos) + to : to) + std::string(target.c_str() + pos + from.length());
 		pos += to.length();
@@ -402,7 +392,7 @@ std::vector<std::string> fmt::split(const std::string& source, std::initializer_
 		result.push_back(source.substr(cursor_begin));
 	}
 
-	return std::move(result);
+	return result;
 }
 
 std::string fmt::trim(const std::string& source, const std::string& values)

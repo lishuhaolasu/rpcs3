@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 
 #include "stdafx.h"
-#include <QtCore>
+#include <QDir>
 #include <QComboBox>
 #include <QFont>
 #include <QIcon>
@@ -13,6 +13,12 @@ namespace gui
 {
 	namespace utils
 	{
+		template<typename T>
+		static QSet<T> list_to_set(const QList<T>& list)
+		{
+			return QSet<T>(list.begin(), list.end());
+		}
+
 		// Creates a frame geometry rectangle with given width height that's centered inside the origin,
 		// while still considering screen boundaries.
 		QRect create_centered_window_geometry(const QRect& origin, s32 width, s32 height);
@@ -31,7 +37,7 @@ namespace gui
 		QStringList get_dir_entries(const QDir& dir, const QStringList& name_filters);
 
 		// Returns the color specified by its color_role for the QLabels with object_name
-		QColor get_label_color(const QString& object_name, QPalette::ColorRole color_role = QPalette::Foreground);
+		QColor get_label_color(const QString& object_name, QPalette::ColorRole color_role = QPalette::WindowText);
 
 		// Returns the font of the QLabels with object_name
 		QFont get_label_font(const QString& object_name);
@@ -47,5 +53,8 @@ namespace gui
 
 		// Opens an image in a new window with original size
 		void show_windowed_image(const QImage& img, const QString& title = "");
+
+		// Loads the app icon from path and embeds it centered into an empty square icon
+		QIcon get_app_icon_from_path(const std::string& path, const std::string& title_id);
 	} // utils
 } // gui

@@ -1,6 +1,7 @@
-#pragma once
+﻿#pragma once
 
 #include "sys_sync.h"
+#include "sys_mutex.h"
 
 struct lv2_mutex;
 
@@ -12,8 +13,8 @@ struct sys_cond_attribute_t
 
 	union
 	{
-		char name[8];
-		u64 name_u64;
+		nse_t<u64, 1> name_u64;
+		char name[sizeof(u64)];
 	};
 };
 
@@ -32,8 +33,8 @@ struct lv2_cond final : lv2_obj
 
 	lv2_cond(u32 shared, s32 flags, u64 key, u64 name, std::shared_ptr<lv2_mutex> mutex)
 		: shared(shared)
-		, key(key)
 		, flags(flags)
+		, key(key)
 		, name(name)
 		, mutex(std::move(mutex))
 	{
@@ -50,8 +51,8 @@ class ppu_thread;
 
 // Syscalls
 
-error_code sys_cond_create(vm::ptr<u32> cond_id, u32 mutex_id, vm::ptr<sys_cond_attribute_t> attr);
-error_code sys_cond_destroy(u32 cond_id);
+error_code sys_cond_create(ppu_thread& ppu, vm::ptr<u32> cond_id, u32 mutex_id, vm::ptr<sys_cond_attribute_t> attr);
+error_code sys_cond_destroy(ppu_thread& ppu, u32 cond_id);
 error_code sys_cond_wait(ppu_thread& ppu, u32 cond_id, u64 timeout);
 error_code sys_cond_signal(ppu_thread& ppu, u32 cond_id);
 error_code sys_cond_signal_all(ppu_thread& ppu, u32 cond_id);

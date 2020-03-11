@@ -1,8 +1,6 @@
-#pragma once
+﻿#pragma once
 
 // I just want the struct for the save data.
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
 #include "Emu/Cell/Modules/cellSaveData.h"
 
 #include <QDialog>

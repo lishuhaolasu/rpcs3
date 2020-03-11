@@ -1,8 +1,4 @@
-#pragma once
-
-#include "stdafx.h"
-#include "rpcs3/Loader/TROPUSR.h"
-#include "gui_settings.h"
+﻿#pragma once
 
 #include "Utilities/rXml.h"
 
@@ -13,6 +9,9 @@
 #include <QTableWidget>
 #include <QSlider>
 #include <QSplitter>
+
+class gui_settings;
+class TROPUSRLoader;
 
 struct GameTrophiesData
 {
@@ -31,6 +30,7 @@ enum TrophyColumns
 	Type = 3,
 	IsUnlocked = 4,
 	Id = 5,
+	PlatinumLink = 6,
 
 	Count
 };
@@ -46,6 +46,8 @@ enum GameColumns
 
 class trophy_manager_dialog : public QWidget
 {
+	Q_OBJECT
+
 	const QString Bronze   = "Bronze";
 	const QString Silver   = "Silver";
 	const QString Gold     = "Gold";
@@ -53,8 +55,14 @@ class trophy_manager_dialog : public QWidget
 
 public:
 	explicit trophy_manager_dialog(std::shared_ptr<gui_settings> gui_settings);
+	~trophy_manager_dialog() override;
+	void RepaintUI(bool restore_layout = true);
+
+public Q_SLOTS:
+	void HandleRepaintUiRequest();
 
 private Q_SLOTS:
+	QPixmap GetResizedGameIcon(int index);
 	void ResizeGameIcons();
 	void ResizeTrophyIcons();
 	void ApplyFilter();
@@ -66,10 +74,18 @@ private:
 	*/
 	bool LoadTrophyFolderToDB(const std::string& trop_name);
 
-	/** Fills UI with information.
+	/** Populate the trophy database (multithreaded). */
+	void StartTrophyLoadThreads();
+
+	/** Fills game table with information.
 	Takes results from LoadTrophyFolderToDB and puts it into the UI.
 	*/
-	void PopulateUI();
+	void PopulateGameTable();
+
+	/** Fills trophy table with information.
+	Takes results from LoadTrophyFolderToDB and puts it into the UI.
+	*/
+	void PopulateTrophyTable();
 
 	void ReadjustGameTable();
 	void ReadjustTrophyTable();
@@ -93,6 +109,7 @@ private:
 	bool m_show_silver_trophies = true;
 	bool m_show_gold_trophies = true;
 	bool m_show_platinum_trophies = true;
+	std::string m_trophy_dir;
 
 	int m_icon_height = 75;
 	bool m_save_icon_height = false;
@@ -102,4 +119,5 @@ private:
 	QSize m_game_icon_size = QSize(m_game_icon_size_index, m_game_icon_size_index);
 	bool m_save_game_icon_size = false;
 	QSlider* m_game_icon_slider = nullptr;
+	QColor m_game_icon_color;
 };

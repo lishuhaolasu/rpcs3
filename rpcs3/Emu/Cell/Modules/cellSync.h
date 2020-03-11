@@ -1,8 +1,8 @@
 #pragma once
 
+#include "Emu/Memory/vm_ptr.h"
+
 #include "Utilities/BitField.h"
-
-
 
 // Return Codes
 enum CellSyncError : u32
@@ -36,34 +36,34 @@ enum CellSyncError1 : u32
 
 struct CellSyncMutex
 {
-	struct alignas(4) ctrl_t
+	struct alignas(4) Counter
 	{
 		be_t<u16> rel;
 		be_t<u16> acq;
-	};
 
-	atomic_t<ctrl_t> ctrl;
-
-	static inline auto lock_begin(ctrl_t& ctrl)
-	{
-		return ctrl.acq++;
-	}
-
-	static inline bool try_lock(ctrl_t& ctrl)
-	{
-		if (UNLIKELY(ctrl.rel != ctrl.acq))
+		auto lock_begin()
 		{
-			return false;
+			return acq++;
 		}
 
-		ctrl.acq++;
-		return true;
-	}
+		bool try_lock()
+		{
+			if (rel != acq) [[unlikely]]
+			{
+				return false;
+			}
 
-	static inline void unlock(ctrl_t& ctrl)
-	{
-		ctrl.rel++;
-	}
+			acq++;
+			return true;
+		}
+
+		void unlock()
+		{
+			rel++;
+		}
+	};
+
+	atomic_t<Counter> ctrl;
 };
 
 CHECK_SIZE_ALIGN(CellSyncMutex, 4, 4);
@@ -91,7 +91,7 @@ struct CellSyncBarrier
 		}
 
 		return true;
-	};
+	}
 
 	static inline bool try_wait(ctrl_t& ctrl)
 	{

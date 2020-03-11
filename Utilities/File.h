@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 
+
 namespace fs
 {
 #ifdef _WIN32
@@ -65,10 +66,11 @@ namespace fs
 		s64 ctime;
 	};
 
-	// Native handle getter
-	struct get_native_handle
+	// Helper, layout is equal to iovec struct
+	struct iovec_clone
 	{
-		virtual native_handle get() = 0;
+		const void* iov_base;
+		std::size_t iov_len;
 	};
 
 	// File handle base
@@ -83,6 +85,8 @@ namespace fs
 		virtual u64 write(const void* buffer, u64 size) = 0;
 		virtual u64 seek(s64 offset, seek_mode whence) = 0;
 		virtual u64 size() = 0;
+		virtual native_handle get_handle();
+		virtual u64 write_gather(const iovec_clone* buffers, u64 buf_count);
 	};
 
 	// Directory entry (TODO)
@@ -366,6 +370,13 @@ namespace fs
 
 		// Get native handle if available
 		native_handle get_handle() const;
+
+		// Gathered write
+		u64 write_gather(const iovec_clone* buffers, u64 buf_count) const
+		{
+			if (!m_file) xnull();
+			return m_file->write_gather(buffers, buf_count);
+		}
 	};
 
 	class dir final
@@ -484,17 +495,14 @@ namespace fs
 	// Get configuration directory
 	const std::string& get_config_dir();
 
-	// Get data/cache directory for specified prefix and suffix
-	std::string get_data_dir(const std::string& prefix, const std::string& location, const std::string& suffix);
-
-	// Get data/cache directory for specified prefix and path (suffix will be filename)
-	std::string get_data_dir(const std::string& prefix, const std::string& path);
+	// Get common cache directory
+	const std::string& get_cache_dir();
 
 	// Delete directory and all its contents recursively
-	void remove_all(const std::string& path, bool remove_root = true);
+	bool remove_all(const std::string& path, bool remove_root = true);
 
 	// Get size of all files recursively
-	u64 get_dir_size(const std::string& path);
+	u64 get_dir_size(const std::string& path, u64 rounding_alignment = 1);
 
 	enum class error : uint
 	{
@@ -505,6 +513,10 @@ namespace fs
 		exist,
 		acces,
 		notempty,
+		readonly,
+		isdir,
+		toolong,
+		unknown
 	};
 
 	// Error code returned
@@ -586,8 +598,7 @@ namespace fs
 			const s64 new_pos =
 				whence == fs::seek_set ? offset :
 				whence == fs::seek_cur ? offset + pos :
-				whence == fs::seek_end ? offset + size() :
-				(fmt::raw_error("fs::container_stream<>::seek(): invalid whence"), 0);
+				whence == fs::seek_end ? offset + size() : -1;
 
 			if (new_pos < 0)
 			{
@@ -619,10 +630,12 @@ namespace fs
 		if (fs::file f{path, mode})
 		{
 			// Write args sequentially
-			int seq[]{ (f.write(args), 0)... };
+			(f.write(args), ...);
 			return true;
 		}
 
 		return false;
 	}
+
+	file make_gather(std::vector<file>);
 }

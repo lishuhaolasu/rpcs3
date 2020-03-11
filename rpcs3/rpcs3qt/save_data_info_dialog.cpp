@@ -1,8 +1,10 @@
+﻿#include "stdafx.h"
 #include "save_data_info_dialog.h"
 
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include "Emu/System.h"
 
 constexpr auto qstr = QString::fromStdString;
 
@@ -60,7 +62,7 @@ void save_data_info_dialog::UpdateData()
 
 	//Maybe there should be more details of save data.
 	m_list->setItem(0, 0, new QTableWidgetItem(tr("User ID")));
-	m_list->setItem(0, 1, new QTableWidgetItem("00000001 (Default)"));
+	m_list->setItem(0, 1, new QTableWidgetItem(qstr(Emu.GetUsr())));
 
 	m_list->setItem(1, 0, new QTableWidgetItem(tr("Title")));
 	m_list->setItem(1, 1, new QTableWidgetItem(qstr(m_entry.title)));
@@ -72,7 +74,7 @@ void save_data_info_dialog::UpdateData()
 	m_list->setItem(3, 1, new QTableWidgetItem(qstr(m_entry.details)));
 
 	QImage img;
-	if (m_entry.iconBuf.size() > 0 && img.loadFromData((uchar*)&m_entry.iconBuf[0], m_entry.iconBuf.size(), "PNG"))
+	if (!m_entry.iconBuf.empty() && img.loadFromData(m_entry.iconBuf.data(), static_cast<int>(m_entry.iconBuf.size()), "PNG"))
 	{
 		m_list->insertRow(0);
 		QTableWidgetItem* img_item = new QTableWidgetItem();

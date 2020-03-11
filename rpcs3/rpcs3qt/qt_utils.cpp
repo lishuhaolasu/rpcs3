@@ -1,10 +1,14 @@
-
-#include "qt_utils.h"
+﻿#include "qt_utils.h"
 #include <QApplication>
 #include <QBitmap>
 #include <QFontMetrics>
 #include <QPainter>
 #include <QScreen>
+
+#include "Emu/System.h"
+
+inline std::string sstr(const QString& _in) { return _in.toStdString(); }
+constexpr auto qstr = QString::fromStdString;
 
 namespace gui
 {
@@ -79,6 +83,7 @@ namespace gui
 				white_pixmap.setMask(white_mask);
 
 				QPainter painter(&pixmap);
+				painter.setRenderHint(QPainter::SmoothPixmapTransform);
 				painter.drawPixmap(QPoint(0, 0), white_pixmap);
 				//painter.drawPixmap(QPoint(0, 0), test_pixmap);
 				painter.end();
@@ -108,7 +113,7 @@ namespace gui
 			dummy_color.setObjectName(object_name);
 			dummy_color.ensurePolished();
 			return dummy_color.palette().color(color_role);
-		};
+		}
 
 		QFont get_label_font(const QString& object_name)
 		{
@@ -116,7 +121,7 @@ namespace gui
 			dummy_font.setObjectName(object_name);
 			dummy_font.ensurePolished();
 			return dummy_font.font();
-		};
+		}
 
 		QImage get_opaque_image_area(const QString& path)
 		{
@@ -129,7 +134,7 @@ namespace gui
 
 			for (int y = 0; y < image.height(); ++y)
 			{
-				QRgb *row = (QRgb*)image.scanLine(y);
+				QRgb* row = reinterpret_cast<QRgb*>(image.scanLine(y));
 				bool row_filled = false;
 
 				for (int x = 0; x < image.width(); ++x)
@@ -166,7 +171,7 @@ namespace gui
 
 			for (int i = 0; i < combo->count(); ++i)
 			{
-				max_width = std::max(max_width, font_metrics.width(combo->itemText(i)));
+				max_width = std::max(max_width, font_metrics.horizontalAdvance(combo->itemText(i)));
 			}
 
 			if (combo->view()->minimumWidth() < max_width)
@@ -176,7 +181,7 @@ namespace gui
 				max_width += combo->view()->autoScrollMargin();
 				combo->view()->setMinimumWidth(max_width);
 			}
-		};
+		}
 
 		void update_table_item_count(QTableWidget* table)
 		{
@@ -207,7 +212,7 @@ namespace gui
 			table->clearContents();
 			table->setRowCount(0);
 
-			for (u32 i = 0; i < item_count; ++i)
+			for (int i = 0; i < item_count; ++i)
 				table->insertRow(i);
 
 			if (table->horizontalScrollBar())
@@ -226,6 +231,50 @@ namespace gui
 			canvas->setFixedSize(img.size());
 			canvas->ensurePolished();
 			canvas->show();
+		}
+
+		// Loads the app icon from path and embeds it centered into an empty square icon
+		QIcon get_app_icon_from_path(const std::string& path, const std::string& title_id)
+		{
+			// get Icon for the gs_frame from path. this handles presumably all possible use cases
+			const QString qpath = qstr(path);
+			const std::string path_list[] = { path, sstr(qpath.section("/", 0, -2, QString::SectionIncludeTrailingSep)),
+			                                  sstr(qpath.section("/", 0, -3, QString::SectionIncludeTrailingSep)) };
+
+			for (const std::string& pth : path_list)
+			{
+				if (!fs::is_dir(pth))
+				{
+					continue;
+				}
+
+				const std::string sfo_dir = Emulator::GetSfoDirFromGamePath(pth, Emu.GetUsr(), title_id);
+				const std::string ico = sfo_dir + "/ICON0.PNG";
+				if (fs::is_file(ico))
+				{
+					// load the image from path. It will most likely be a rectangle
+					QImage source = QImage(qstr(ico));
+					const int edge_max = std::max(source.width(), source.height());
+
+					// create a new transparent image with square size and same format as source (maybe handle other formats than RGB32 as well?)
+					QImage::Format format = source.format() == QImage::Format_RGB32 ? QImage::Format_ARGB32 : source.format();
+					QImage dest = QImage(edge_max, edge_max, format);
+					dest.fill(Qt::transparent);
+
+					// get the location to draw the source image centered within the dest image.
+					const QPoint dest_pos = source.width() > source.height() ? QPoint(0, (source.width() - source.height()) / 2) : QPoint((source.height() - source.width()) / 2, 0);
+
+					// Paint the source into/over the dest
+					QPainter painter(&dest);
+					painter.setRenderHint(QPainter::SmoothPixmapTransform);
+					painter.drawImage(dest_pos, source);
+					painter.end();
+
+					return QIcon(QPixmap::fromImage(dest));
+				}
+			}
+			// if nothing was found reset the icon to default
+			return QApplication::windowIcon();
 		}
 	} // utils
 } // gui

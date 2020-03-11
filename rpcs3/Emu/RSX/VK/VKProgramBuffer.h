@@ -1,49 +1,51 @@
-#pragma once
+﻿#pragma once
 #include "VKVertexProgram.h"
 #include "VKFragmentProgram.h"
 #include "../Common/ProgramStateCache.h"
 #include "Utilities/hash.h"
 #include "VKHelpers.h"
+#include "VKRenderPass.h"
 
 namespace vk
 {
 	struct pipeline_props
 	{
 		graphics_pipeline_state state;
-		VkRenderPass render_pass;
-		int num_targets;
-		int render_pass_location;
+		u64 renderpass_key;
 
 		bool operator==(const pipeline_props& other) const
 		{
-			if (memcmp(&state.att_state[0], &other.state.att_state[0], sizeof(VkPipelineColorBlendAttachmentState)))
-				return false;
-
-			if (render_pass_location != other.render_pass_location)
-				return false;
-
-			if (memcmp(&state.rs, &other.state.rs, sizeof(VkPipelineRasterizationStateCreateInfo)))
-				return false;
-
-			//Cannot memcmp cs due to pAttachments being a pointer to memory
-			if (state.cs.attachmentCount != other.state.cs.attachmentCount ||
-				state.cs.flags != other.state.cs.flags ||
-				state.cs.logicOp != other.state.cs.logicOp ||
-				state.cs.logicOpEnable != other.state.cs.logicOpEnable ||
-				state.cs.sType != other.state.cs.sType ||
-				memcmp(state.cs.blendConstants, other.state.cs.blendConstants, 4 * sizeof(f32)))
+			if (renderpass_key != other.renderpass_key)
 				return false;
 
 			if (memcmp(&state.ia, &other.state.ia, sizeof(VkPipelineInputAssemblyStateCreateInfo)))
 				return false;
 
+			if (memcmp(&state.att_state[0], &other.state.att_state[0], sizeof(VkPipelineColorBlendAttachmentState)))
+				return false;
+
+			if (memcmp(&state.rs, &other.state.rs, sizeof(VkPipelineRasterizationStateCreateInfo)))
+				return false;
+
+			// Cannot memcmp cs due to pAttachments being a pointer to memory
+			if (state.cs.logicOp != other.state.cs.logicOp ||
+				state.cs.logicOpEnable != other.state.cs.logicOpEnable ||
+				memcmp(state.cs.blendConstants, other.state.cs.blendConstants, 4 * sizeof(f32)))
+				return false;
+
 			if (memcmp(&state.ds, &other.state.ds, sizeof(VkPipelineDepthStencilStateCreateInfo)))
 				return false;
 
-			if (num_targets != other.num_targets)
-				return false;
+			if (state.ms.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT)
+			{
+				if (memcmp(&state.ms, &other.state.ms, sizeof(VkPipelineMultisampleStateCreateInfo)))
+					return false;
 
-			return num_targets == other.num_targets;
+				if (state.temp_storage.msaa_sample_mask != other.state.temp_storage.msaa_sample_mask)
+					return false;
+			}
+
+			return true;
 		}
 	};
 }
@@ -53,18 +55,20 @@ namespace rpcs3
 	template <>
 	size_t hash_struct<vk::pipeline_props>(const vk::pipeline_props &pipelineProperties)
 	{
-		size_t seed = hash_base<int>(pipelineProperties.num_targets);
+		size_t seed = hash_base(pipelineProperties.renderpass_key);
 		seed ^= hash_struct(pipelineProperties.state.ia);
 		seed ^= hash_struct(pipelineProperties.state.ds);
 		seed ^= hash_struct(pipelineProperties.state.rs);
+		seed ^= hash_struct(pipelineProperties.state.ms);
+		seed ^= hash_base(pipelineProperties.state.temp_storage.msaa_sample_mask);
 
-		//Do not compare pointers to memory!
-		auto tmp = pipelineProperties.state.cs;
+		// Do not compare pointers to memory!
+		VkPipelineColorBlendStateCreateInfo tmp;
+		memcpy(&tmp, &pipelineProperties.state.cs, sizeof(VkPipelineColorBlendStateCreateInfo));
 		tmp.pAttachments = nullptr;
-		seed ^= hash_struct(tmp);
 
 		seed ^= hash_struct(pipelineProperties.state.att_state[0]);
-		return hash_base<size_t>(seed);
+		return hash_base(seed);
 	}
 }
 
@@ -122,12 +126,17 @@ struct VKTraits
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_LINE_WIDTH;
-		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_BLEND_CONSTANTS;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_STENCIL_WRITE_MASK;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
 		dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+
+		if (vk::get_current_renderer()->get_depth_bounds_support())
+		{
+			dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS;
+		}
+
 		dynamic_state_info.pDynamicStates = dynamic_state_descriptors;
 
 		VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -137,10 +146,17 @@ struct VKTraits
 		vp.viewportCount = 1;
 		vp.scissorCount = 1;
 
-		VkPipelineMultisampleStateCreateInfo ms = {};
-		ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-		ms.pSampleMask = NULL;
-		ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+		VkPipelineMultisampleStateCreateInfo ms = pipelineProperties.state.ms;
+		verify("Multisample state mismatch!" HERE), ms.rasterizationSamples == VkSampleCountFlagBits((pipelineProperties.renderpass_key >> 16) & 0xF);
+		if (ms.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT)
+		{
+			// Update the sample mask pointer
+			ms.pSampleMask = &pipelineProperties.state.temp_storage.msaa_sample_mask;
+		}
+
+		// Rebase pointers from pipeline structure in case it is moved/copied
+		VkPipelineColorBlendStateCreateInfo cs = pipelineProperties.state.cs;
+		cs.pAttachments = pipelineProperties.state.att_state;
 
 		VkPipeline pipeline;
 		VkGraphicsPipelineCreateInfo info = {};
@@ -148,7 +164,7 @@ struct VKTraits
 		info.pVertexInputState = &vi;
 		info.pInputAssemblyState = &pipelineProperties.state.ia;
 		info.pRasterizationState = &pipelineProperties.state.rs;
-		info.pColorBlendState = &pipelineProperties.state.cs;
+		info.pColorBlendState = &cs;
 		info.pMultisampleState = &ms;
 		info.pViewportState = &vp;
 		info.pDepthStencilState = &pipelineProperties.state.ds;
@@ -158,42 +174,34 @@ struct VKTraits
 		info.layout = common_pipeline_layout;
 		info.basePipelineIndex = -1;
 		info.basePipelineHandle = VK_NULL_HANDLE;
-		info.renderPass = pipelineProperties.render_pass;
+		info.renderPass = vk::get_renderpass(dev, pipelineProperties.renderpass_key);
 
 		CHECK_RESULT(vkCreateGraphicsPipelines(dev, nullptr, 1, &info, NULL, &pipeline));
-		pipeline_storage_type result = std::make_unique<vk::glsl::program>(dev, pipeline, vertexProgramData.uniforms, fragmentProgramData.uniforms);
 
+		pipeline_storage_type result = std::make_unique<vk::glsl::program>(dev, pipeline, vertexProgramData.uniforms, fragmentProgramData.uniforms);
+		result->link();
 		return result;
 	}
 };
 
-class VKProgramBuffer : public program_state_cache<VKTraits>
+struct VKProgramBuffer : public program_state_cache<VKTraits>
 {
-	const VkRenderPass *m_render_pass_data;
-
-public:
-	VKProgramBuffer(VkRenderPass *renderpass_list)
-		: m_render_pass_data(renderpass_list)
-	{}
-
-	void clear()
+	VKProgramBuffer(decompiler_callback_t callback)
 	{
-		program_state_cache<VKTraits>::clear();
-		m_vertex_shader_cache.clear();
-		m_fragment_shader_cache.clear();
+		notify_pipeline_compiled = callback;
 	}
 
-	u64 get_hash(vk::pipeline_props &props)
+	u64 get_hash(const vk::pipeline_props &props)
 	{
 		return rpcs3::hash_struct<vk::pipeline_props>(props);
 	}
 
-	u64 get_hash(RSXVertexProgram &prog)
+	u64 get_hash(const RSXVertexProgram &prog)
 	{
 		return program_hash_util::vertex_program_utils::get_vertex_program_ucode_hash(prog);
 	}
 
-	u64 get_hash(RSXFragmentProgram &prog)
+	u64 get_hash(const RSXFragmentProgram &prog)
 	{
 		return program_hash_util::fragment_program_utils::get_fragment_program_ucode_hash(prog);
 	}
@@ -201,11 +209,8 @@ public:
 	template <typename... Args>
 	void add_pipeline_entry(RSXVertexProgram &vp, RSXFragmentProgram &fp, vk::pipeline_props &props, Args&& ...args)
 	{
-		//Extract pointers from pipeline props
-		props.render_pass = m_render_pass_data[props.render_pass_location];
-		props.state.cs.pAttachments = props.state.att_state;
 		vp.skip_vertex_input_check = true;
-		getGraphicPipelineState(vp, fp, props, std::forward<Args>(args)...);
+		get_graphics_pipeline(vp, fp, props, false, false, std::forward<Args>(args)...);
 	}
 
     void preload_programs(RSXVertexProgram &vp, RSXFragmentProgram &fp)

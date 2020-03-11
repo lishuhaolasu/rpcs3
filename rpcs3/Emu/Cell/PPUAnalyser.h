@@ -68,7 +68,7 @@ struct ppu_segment
 // PPU Module Information
 struct ppu_module
 {
-	uchar sha1[20];
+	uchar sha1[20]{};
 	std::string name;
 	std::string path;
 	std::string cache;
@@ -966,10 +966,10 @@ struct ppu_acontext
 		// Integral range: normalized undef = (0;UINT64_MAX), unnormalized undefs are possible (when max = min - 1)
 		// Bit range: constant 0 = (0;0), constant 1 = (1;1), normalized undef = (0;1), unnormalized undef = (1;0)
 
-		u64 imin = 0; // Integral range begin
-		u64 imax = -1; // Integral range end
-		u64 bmin = 0; // Bit range begin
-		u64 bmax = -1; // Bit range end
+		u64 imin = 0ull; // Integral range begin
+		u64 imax = ~0ull; // Integral range end
+		u64 bmin = 0ull; // Bit range begin
+		u64 bmax = ~0ull; // Bit range end
 
 		void set_undef()
 		{
@@ -1006,7 +1006,7 @@ struct ppu_acontext
 		// Return number of trailing zero bits
 		u64 tz() const
 		{
-			return ::cnttz64(mask());
+			return utils::cnttz64(mask());
 		}
 
 		// Range NOT
@@ -1029,7 +1029,7 @@ struct ppu_acontext
 			const u64 bdiv = rhs.div();
 
 			// Check overflow, generate normalized range
-			if (adiv != -1 && bdiv != -1 && adiv <= adiv + bdiv)
+			if (adiv != umax && bdiv != umax && adiv <= adiv + bdiv)
 			{
 				r = range(imin + rhs.imin, imax + rhs.imax);
 			}
@@ -1255,7 +1255,7 @@ struct ppu_acontext
 			if (min < max)
 			{
 				// Inverted constant MSB mask
-				const u64 mix = ~0ull >> ::cntlz64(min ^ max, true);
+				const u64 mix = ~0ull >> utils::cntlz64(min ^ max, true);
 				r.bmin |= min & ~mix;
 				r.bmax &= max | mix;
 

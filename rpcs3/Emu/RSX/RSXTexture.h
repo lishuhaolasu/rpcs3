@@ -1,19 +1,8 @@
-#pragma once
-#include "GCM.h"
+﻿#pragma once
+#include "gcm_enums.h"
 
 namespace rsx
 {
-	/**
-	* Use an extra cubemap format
-	*/
-	enum class texture_dimension_extended : u8
-	{
-		texture_dimension_1d = 0,
-		texture_dimension_2d = 1,
-		texture_dimension_cubemap = 2,
-		texture_dimension_3d = 3,
-	};
-
 	class fragment_texture
 	{
 	protected:
@@ -23,9 +12,6 @@ namespace rsx
 	public:
 		fragment_texture(u8 idx, std::array<u32, 0x10000 / 4> &r) : m_index(idx), registers(r) { }
 		fragment_texture() = delete;
-
-		//initialize texture registers with default values
-		void init();
 
 		// Offset
 		u32 offset() const;
@@ -54,16 +40,16 @@ namespace rsx
 		rsx::texture_wrap_mode wrap_s() const;
 		rsx::texture_wrap_mode wrap_t() const;
 		rsx::texture_wrap_mode wrap_r() const;
+		rsx::comparison_function zfunc() const;
 		u8 unsigned_remap() const;
-		u8 zfunc() const;
 		u8 gamma() const;
 		u8 aniso_bias() const;
 		u8 signed_remap() const;
 
 		// Control0
 		bool enabled() const;
-		u16  min_lod() const;
-		u16  max_lod() const;
+		f32 min_lod() const;
+		f32 max_lod() const;
 		rsx::texture_max_anisotropy   max_aniso() const;
 		bool alpha_kill_enabled() const;
 
@@ -79,7 +65,7 @@ namespace rsx
 		std::pair<std::array<u8, 4>, std::array<u8, 4>> decoded_remap() const;
 
 		// Filter
-		float bias() const;
+		f32 bias() const;
 		rsx::texture_minify_filter  min_filter() const;
 		rsx::texture_magnify_filter  mag_filter() const;
 		u8  convolution_filter() const;
@@ -108,9 +94,6 @@ namespace rsx
 		vertex_texture(u8 idx, std::array<u32, 0x10000 / 4> &r) : m_index(idx), registers(r) { }
 		vertex_texture() = delete;
 
-		//initialize texture registers with default values
-		void init();
-
 		// Offset
 		u32 offset() const;
 
@@ -123,31 +106,22 @@ namespace rsx
 		u16 mipmap() const;
 
 		// Address
-		u8 unsigned_remap() const;
-		u8 zfunc() const;
-		u8 gamma() const;
-		u8 aniso_bias() const;
-		u8 signed_remap() const;
+		rsx::texture_wrap_mode wrap_s() const;
+		rsx::texture_wrap_mode wrap_t() const;
+		rsx::texture_wrap_mode wrap_r() const;
 
 		std::pair<std::array<u8, 4>, std::array<u8, 4>> decoded_remap() const;
 		u32 remap() const;
 
 		// Control0
 		bool enabled() const;
-		u16 min_lod() const;
-		u16 max_lod() const;
-		rsx::texture_max_anisotropy max_aniso() const;
-		bool alpha_kill_enabled() const;
+		f32 min_lod() const;
+		f32 max_lod() const;
 
 		// Filter
-		u16 bias() const;
+		f32 bias() const;
 		rsx::texture_minify_filter min_filter() const;
 		rsx::texture_magnify_filter mag_filter() const;
-		u8 convolution_filter() const;
-		bool a_signed() const;
-		bool r_signed() const;
-		bool g_signed() const;
-		bool b_signed() const;
 
 		// Image Rect
 		u16 width() const;
